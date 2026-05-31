@@ -1,0 +1,43 @@
+diff --git a/common/src/main/java/org/vivecraft/client_vr/VRState.java b/common/src/main/java/org/vivecraft/client_vr/VRState.java
+--- a/common/src/main/java/org/vivecraft/client_vr/VRState.java
++++ b/common/src/main/java/org/vivecraft/client_vr/VRState.java
+@@ -12,6 +12,7 @@ import org.vivecraft.client_vr.bodylink.Haptics;
+ import org.vivecraft.client_vr.gameplay.VRPlayer;
+ import org.vivecraft.client_vr.menuworlds.MenuWorldRenderer;
+ import org.vivecraft.client_vr.provider.nullvr.NullVR;
++import org.vivecraft.client_vr.provider.apple.AppleVisionProvider;
+ import org.vivecraft.client_vr.provider.openvr_lwjgl.MCOpenVR;
+ import org.vivecraft.client_vr.render.RenderConfigException;
+ import org.vivecraft.client_vr.render.VRShaders;
+@@ -64,8 +65,10 @@ public class VRState {
+             }
+ 
+             ClientDataHolderVR dh = ClientDataHolderVR.getInstance();
+-            if (dh.vrSettings.stereoProviderPluginID == VRSettings.VRProvider.OPENVR) {
++            if (dh.vrSettings.stereoProviderPluginID == VRSettings.VRProvider.APPLE_VISION) {
++                dh.vr = new AppleVisionProvider(Minecraft.getInstance(), dh);
++            } else if (dh.vrSettings.stereoProviderPluginID == VRSettings.VRProvider.OPENVR) {
+                 dh.vr = new MCOpenVR(Minecraft.getInstance(), dh);
+             } else {
+                 dh.vr = new NullVR(Minecraft.getInstance(), dh);
+diff --git a/common/src/main/java/org/vivecraft/client_vr/settings/VRSettings.java b/common/src/main/java/org/vivecraft/client_vr/settings/VRSettings.java
+--- a/common/src/main/java/org/vivecraft/client_vr/settings/VRSettings.java
++++ b/common/src/main/java/org/vivecraft/client_vr/settings/VRSettings.java
+@@ -178,6 +178,7 @@ public class VRSettings {
+ 
+     public enum VRProvider implements OptionEnum<VRProvider> {
+         OPENVR,
++        APPLE_VISION,
+         NULLVR
+     }
+diff --git a/common/src/main/java/org/vivecraft/client_vr/provider/DeviceSource.java b/common/src/main/java/org/vivecraft/client_vr/provider/DeviceSource.java
+--- a/common/src/main/java/org/vivecraft/client_vr/provider/DeviceSource.java
++++ b/common/src/main/java/org/vivecraft/client_vr/provider/DeviceSource.java
+@@ -56,6 +56,7 @@ public class DeviceSource {
+     public enum Source {
+         NULL,
+         OPENVR,
++        APPLE,
+         OSC
+     }
+ }

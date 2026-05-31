@@ -1,0 +1,18 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+*.iml
+.idea/
+.DS_Store
+xcuserdata/
+DerivedData/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+mac-host/build/
+
+# Vivecraft submodule build outputs
+minecraft/VivecraftMod/
+
+# Local secrets
+.env
+*.local
