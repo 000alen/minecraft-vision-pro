@@ -18,8 +18,8 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Run bridge unit tests
+      - name: Run bridge unit + integration tests
         run: ./gradlew test --no-daemon
 
-      - name: Build bridge JAR
-        run: ./gradlew :bridge-lib:jar :bridge-test:classes --no-daemon
+      - name: Build bridge artifacts
+        run: ./gradlew :bridge-lib:jar :bridge-mock-host:jar :bridge-test:classes --no-daemon

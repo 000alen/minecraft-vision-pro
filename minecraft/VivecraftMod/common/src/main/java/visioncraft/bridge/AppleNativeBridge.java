@@ -44,7 +44,7 @@ public final class AppleNativeBridge implements AutoCloseable {
     private Thread readerThread;
 
     public AppleNativeBridge() {
-        this(DEFAULT_HOST, DEFAULT_PORT);
+        this(BridgeSettings.host(), BridgeSettings.port());
     }
 
     public AppleNativeBridge(String host, int port) {

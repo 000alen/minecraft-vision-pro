@@ -7,7 +7,7 @@ Last updated: 2026-05-31
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | **M0** | RemoteImmersiveSpace + Metal stereo on Vision Pro | Code complete — **requires Mac + AVP hardware validation** |
-| **M1** | Java ↔ native bridge (test patterns + pose) | Code complete — run `./gradlew :bridge-test:run` with host |
+| **M1** | Java ↔ native bridge (test patterns + pose) | **Automated in CI** via `MockVisionCraftHost`; visual check still needs real host |
 | **M2** | AppleVisionProvider, no SteamVR path | **Integrated** in vendored Vivecraft, default plugin |
 | **M3** | Stereo main menu on headset | Blocked on M0 + M1 on device |
 | **M4** | In-world head-tracked view | Provider + HMD aim wired — needs device QA |
@@ -18,9 +18,11 @@ Last updated: 2026-05-31
 
 - Vendored VivecraftMod with Apple Vision backend
 - TCP bridge protocol v1 + metrics
+- **`MockVisionCraftHost`** — headless M1 server (no Mac/AVP)
+- **CI integration tests** — stereo frame + pose round-trip on every push
 - VisionCraftHost Swift app (compositor + bridge server)
 - Comfort defaults (seated, HMD aim, fake controllers for crosshair)
-- CI: Gradle bridge unit tests
+- OpenVR `create()` skip on Apple Vision path
 
 ## Hardware validation checklist (you)
 

@@ -17,6 +17,7 @@ import org.vivecraft.client_vr.provider.openvr_lwjgl.VRInputAction;
 import org.vivecraft.client_vr.settings.VRSettings;
 import org.vivecraft.common.utils.MathUtils;
 import visioncraft.bridge.AppleNativeBridge;
+import visioncraft.bridge.BridgeSettings;
 
 import java.io.IOException;
 import java.util.List;
@@ -30,7 +31,7 @@ public class AppleVisionProvider extends MCVR {
 
     private static final float CROSSHAIR_FORWARD_BLOCKS = 0.75f;
 
-    private final AppleNativeBridge bridge = new AppleNativeBridge();
+    private final AppleNativeBridge bridge = new AppleNativeBridge(BridgeSettings.host(), BridgeSettings.port());
     private final AppleSessionState sessionState = new AppleSessionState();
     private final ApplePoseProvider poseProvider;
     private final AppleInputProvider inputProvider = new AppleInputProvider();

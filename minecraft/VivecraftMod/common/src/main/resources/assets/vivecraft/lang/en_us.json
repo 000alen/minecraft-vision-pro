@@ -520,6 +520,7 @@
   "vivecraft.options.menuworldfallback.dirtbox": "Dirtbox",
   "vivecraft.options.menuworldfallback.panorama": "Panorama",
   "vivecraft.options.vrprovider.openvr": "OpenVR/SteamVR",
+  "vivecraft.options.vrprovider.applevision": "Apple Vision (VisionCraft)",
   "vivecraft.options.vrprovider.nullvr": "NullVR",
   "vivecraft.options.realisticjump.auto": "Auto",
   "vivecraft.options.autoopenkeyboard.chat": "Chat",

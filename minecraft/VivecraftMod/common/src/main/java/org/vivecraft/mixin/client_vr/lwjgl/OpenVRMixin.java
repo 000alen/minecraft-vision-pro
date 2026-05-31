@@ -1,6 +1,7 @@
 package org.vivecraft.mixin.client_vr.lwjgl;
 
 import org.lwjgl.openvr.OpenVR;
+import org.vivecraft.client_vr.provider.apple.VisionCraftRuntime;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -62,6 +63,9 @@ public abstract class OpenVRMixin {
     @Overwrite
     public static void create(int tok) {
         token = tok;
+        if (VisionCraftRuntime.skipOpenVR()) {
+            return;
+        }
 
         VRSystem = getGenericInterface(IVRSystem_Version, OpenVR.IVRSystem::new);
         VRChaperone = getGenericInterface(IVRChaperone_Version, OpenVR.IVRChaperone::new);

@@ -56,12 +56,12 @@ Acceptance: stereoscopic cube, head-tracked view, 10 minutes stable. **If M0 fai
 ### 3. M1 — Java ↔ native bridge
 
 ```bash
-# Terminal A: build and run native host (or use Xcode)
-# Terminal B:
-./gradlew :bridge-test:run
+./scripts/validate-bridge.sh          # unit + integration (no hardware)
+./scripts/run-mock-host.sh &          # headless TCP host
+./gradlew :bridge-test:run           # visual stereo patterns (needs host listening)
 ```
 
-Acceptance: left/right test patterns in correct eyes; pose messages received by Java.
+Acceptance: left/right test patterns in correct eyes; pose messages received by Java. Integration tests cover protocol without a headset.
 
 ### 4. M2+ — Vivecraft Apple provider
 
