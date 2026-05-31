@@ -58,4 +58,18 @@ public final class BridgeMath {
     public static float metersToBlocks(float meters) {
         return meters;
     }
+
+    /**
+     * Converts Vision Pro / bridge quaternion to Minecraft head space.
+     * Toggle signs here after M0 axis validation on device.
+     */
+    public static void visionProToMinecraft(float[] xyzwInOut) {
+        normalizeQuaternion(xyzwInOut);
+        // Optional yaw flip if forward is mirrored on hardware bring-up
+        if (Boolean.getBoolean("visioncraft.flipYaw")) {
+            xyzwInOut[1] = -xyzwInOut[1];
+            xyzwInOut[3] = -xyzwInOut[3];
+            normalizeQuaternion(xyzwInOut);
+        }
+    }
 }

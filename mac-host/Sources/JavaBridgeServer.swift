@@ -10,6 +10,7 @@ final class JavaBridgeServer {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: BridgeConnection] = [:]
     private let queue = DispatchQueue(label: "visioncraft.bridge.server")
+    private var currentSession: BridgeSessionState = .closed
 
     func start(port: Int) throws {
         let params = NWParameters.tcp
@@ -18,16 +19,23 @@ final class JavaBridgeServer {
             self?.accept(connection)
         }
         listener?.start(queue: queue)
+        posePublisher?.attach { [weak self] line in
+            self?.broadcast(line)
+        }
+        posePublisher?.startTimer()
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
+        posePublisher?.stop()
+        posePublisher?.detach()
         connections.values.forEach { $0.close() }
         connections.removeAll()
     }
 
     func broadcastSession(_ state: BridgeSessionState) {
+        currentSession = state
         let json = "{\"type\":\"session\",\"version\":1,\"state\":\"\(state.rawValue)\"}\n"
         broadcast(json)
     }
@@ -56,12 +64,10 @@ final class JavaBridgeServer {
         bridge.onClose = { [weak self] in
             self?.connections.removeValue(forKey: id)
         }
-        bridge.onReady = { [weak self] in
-            self?.posePublisher?.startPublishing { line in
-                bridge.send(line)
-            }
-        }
         bridge.start()
+        if currentSession != .closed {
+            bridge.send("{\"type\":\"session\",\"version\":1,\"state\":\"\(currentSession.rawValue)\"}\n")
+        }
     }
 
     private func handleClientLine(_ line: String, bridge: BridgeConnection) {
@@ -73,7 +79,7 @@ final class JavaBridgeServer {
         case "recenter":
             posePublisher?.recenter()
             let counter = posePublisher?.recenterCounter ?? 0
-            bridge.send("{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n")
+            broadcast("{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n")
         case "ping":
             if let ts = obj["timestamp_ns"] {
                 bridge.send("{\"type\":\"pong\",\"version\":1,\"timestamp_ns\":\(ts)}\n")
@@ -91,7 +97,6 @@ private final class BridgeConnection {
     var onFrame: ((Data, Data, Int, Int, UInt64) -> Void)?
     var onLine: ((String) -> Void)?
     var onClose: (() -> Void)?
-    var onReady: (() -> Void)?
 
     private var buffer = Data()
     private var pendingMeta: [String: Any]?
@@ -106,7 +111,6 @@ private final class BridgeConnection {
             if case .cancelled = state { self?.onClose?() }
         }
         connection.start(queue: .global(qos: .userInitiated))
-        onReady?()
         receive()
     }
 
@@ -149,7 +153,7 @@ private final class BridgeConnection {
             let lineData = buffer.subdata(in: buffer.startIndex..<newline)
             buffer.removeSubrange(buffer.startIndex...newline)
             guard let line = String(data: lineData, encoding: .utf8) else { continue }
-            if line.contains("\"type\":\"frame\"") || line.contains("\"type\": \"frame\"") {
+            if line.contains("\"type\":\"frame\"") {
                 if let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
                     pendingMeta = json
                 }
@@ -165,8 +169,16 @@ private final class BridgeConnection {
               let lw = left["width"] as? Int,
               let lh = left["height"] as? Int,
               let leftLen = left["byte_length"] as? Int,
-              let rightLen = right["byte_length"] as? Int,
-              let frameId = meta["frame_id"] as? UInt64 else { return false }
+              let rightLen = right["byte_length"] as? Int else { return false }
+
+        let frameId: UInt64
+        if let n = meta["frame_id"] as? NSNumber {
+            frameId = n.uint64Value
+        } else if let n = meta["frame_id"] as? UInt64 {
+            frameId = n
+        } else {
+            return false
+        }
 
         let total = leftLen + rightLen
         guard buffer.count >= total else { return false }

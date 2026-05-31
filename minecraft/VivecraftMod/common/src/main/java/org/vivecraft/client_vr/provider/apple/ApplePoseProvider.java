@@ -30,9 +30,8 @@ public final class ApplePoseProvider {
             BridgeMath.metersToBlocks(p[1]),
             BridgeMath.metersToBlocks(p[2])
         );
-        float[] q = pose.orientationXyzw();
-        orientation.set(q[0], q[1], q[2], q[3]);
-        BridgeMath.normalizeQuaternion(q);
+        float[] q = pose.orientationXyzw().clone();
+        BridgeMath.visionProToMinecraft(q);
         orientation.set(q[0], q[1], q[2], q[3]);
         lastRecenterCounter = pose.recenterCounter();
     }

@@ -84,6 +84,8 @@ Run **VisionCraftHost** before launching Minecraft.
 6. M5 — 30-minute survival MVP  
 7. M6 — Transport optimization (IOSurface / no CPU readback)
 
+See [STATUS.md](STATUS.md) for milestone progress and hardware validation steps.
+
 ## Milestones
 
 | ID | Goal | Status |

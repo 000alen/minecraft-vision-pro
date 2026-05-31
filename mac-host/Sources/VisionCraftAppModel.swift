@@ -22,6 +22,9 @@ final class VisionCraftAppModel {
         do {
             try bridgeServer.start(port: bridgePort)
             diagnosticText = "Bridge listening on :\(bridgePort)"
+            if immersiveSpaceOpen {
+                bridgeServer.broadcastSession(.ready)
+            }
         } catch {
             diagnosticText = "Bridge failed: \(error.localizedDescription)"
         }

@@ -53,6 +53,31 @@ public final class AppleNativeBridge implements AutoCloseable {
     }
 
     public synchronized void connect() throws IOException {
+        connectInternal();
+    }
+
+    /** Connect with retries while VisionCraftHost is starting. */
+    public synchronized void connectWithRetry(int attempts, long delayMs) throws IOException {
+        IOException last = null;
+        for (int i = 0; i < attempts; i++) {
+            try {
+                connectInternal();
+                return;
+            } catch (IOException e) {
+                last = e;
+                close();
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while connecting", ie);
+                }
+            }
+        }
+        throw last != null ? last : new IOException("Failed to connect to VisionCraft host");
+    }
+
+    private void connectInternal() throws IOException {
         if (connected.get()) {
             return;
         }
@@ -62,6 +87,7 @@ public final class AppleNativeBridge implements AutoCloseable {
         InputStream in = new BufferedInputStream(socket.getInputStream());
         out = new BufferedOutputStream(socket.getOutputStream());
         connected.set(true);
+        sessionState = SessionState.CLOSED;
         readerThread = new Thread(() -> readLoop(in), "visioncraft-bridge-reader");
         readerThread.setDaemon(true);
         readerThread.start();
@@ -106,6 +132,7 @@ public final class AppleNativeBridge implements AutoCloseable {
                 latestPose = new Pose(ts, pos, rot, tracking, recenter);
                 lastPoseTimestampNs.set(ts);
                 recenterCounter.set(recenter);
+                BridgeMetrics.get().onPose(ts);
             }
             case "session" -> sessionState = SessionState.fromString(obj.get("state").getAsString());
             case "recenter" -> {

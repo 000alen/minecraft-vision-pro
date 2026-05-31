@@ -66,14 +66,14 @@ public class AppleVisionStereoRenderer extends VRRenderer {
 
     @Override
     public void endFrame() throws RenderConfigException {
+        float near = 0.05f;
+        float far = this.lastFarClip > 0 ? this.lastFarClip : 512f;
         try {
-            float near = 0.05f;
-            float far = this.lastFarClip > 0 ? this.lastFarClip : 512f;
             submitter.submitEyeTextures(LeftEyeTextureId, RightEyeTextureId, eyeWidth, eyeHeight, near, far);
-        } catch (Exception e) {
+        } catch (IOException e) {
             throw new RenderConfigException(
                 net.minecraft.network.chat.Component.literal("VisionCraft bridge error"),
-                net.minecraft.network.chat.Component.literal(e.getMessage())
+                net.minecraft.network.chat.Component.literal(e.getMessage() != null ? e.getMessage() : "I/O error")
             );
         }
         GL11.glFlush();

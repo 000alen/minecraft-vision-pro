@@ -4,6 +4,7 @@ import com.mojang.blaze3d.opengl.GlStateManager;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.system.MemoryUtil;
 import visioncraft.bridge.AppleNativeBridge;
+import visioncraft.bridge.BridgeMetrics;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -25,8 +26,9 @@ public final class AppleFrameSubmitter {
 
     public void submitEyeTextures(int leftTextureId, int rightTextureId, int width, int height,
         float near, float far) throws IOException {
-        if (!bridge.isConnected() || !bridge.getSessionState().equals(AppleNativeBridge.SessionState.READY)) {
+        if (!bridge.isConnected() || bridge.getSessionState() != AppleNativeBridge.SessionState.READY) {
             droppedFrames++;
+            BridgeMetrics.get().onFrameDropped();
             return;
         }
         long t0 = System.nanoTime();
@@ -41,6 +43,10 @@ public final class AppleFrameSubmitter {
         );
         bridge.sendFrame(packet);
         lastSubmitTimeNs = System.nanoTime() - ts;
+        BridgeMetrics.get().onFrameSubmitted(lastCopyTimeNs, lastSubmitTimeNs);
+        if (id % 90 == 0) {
+            org.vivecraft.client_vr.settings.VRSettings.LOGGER.debug("VisionCraft: {}", BridgeMetrics.get().summary());
+        }
     }
 
     private static byte[] readTextureRgba(int textureId, int width, int height) {
