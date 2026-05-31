@@ -51,11 +51,9 @@ Apple provider copies seated/head-only patterns from NullVR but replaces pose so
 
 [VivecraftMod#446](https://github.com/Vivecraft/VivecraftMod/issues/446) discusses non-OpenVR providers. Use as a map for decoupling, not as the Apple runtime.
 
-## Patch list
+## Vendored integration
 
-| Patch | Description |
-|-------|-------------|
-| `0001-apple-vision-provider.patch` | `VRProvider.APPLE_VISION`, `VRState` branch, `DeviceSource.APPLE` |
+Apple provider and bridge live directly in `minecraft/VivecraftMod/` (no separate patches to apply). See `minecraft/VENDORED.md`.
 
 ## SteamVR avoidance
 

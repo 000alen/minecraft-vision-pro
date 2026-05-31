@@ -1,47 +1,31 @@
-# Minecraft / Vivecraft integration
+# Minecraft (vendored Vivecraft)
 
-## Submodule
+**VivecraftMod is vendored in full** at `VivecraftMod/`. No submodules, no copy step.
 
-```bash
-git submodule update --init VivecraftMod
-```
-
-Pin a specific VivecraftMod commit in `.gitmodules` after validating a Minecraft version.
-
-## Apple provider sources
-
-Copy into VivecraftMod:
-
-```bash
-cp -R src/client/java/org/vivecraft/client_vr/provider/apple/ \
-  VivecraftMod/common/src/main/java/org/vivecraft/client_vr/provider/apple/
-```
-
-Copy bridge Java (or depend on `visioncraft-bridge` JAR):
-
-```bash
-mkdir -p VivecraftMod/common/src/main/java/visioncraft/bridge
-cp ../../bridge/java/*.java VivecraftMod/common/src/main/java/visioncraft/bridge/
-```
-
-## Patches
+## Build
 
 ```bash
 cd VivecraftMod
-patch -p1 < ../patches/0001-apple-vision-provider.patch
+./gradlew :fabric:build
 ```
 
-Add Gson to Vivecraft dependencies if not already present (bridge JSON).
+Output: `VivecraftMod/fabric/build/libs/*.jar` → install in Minecraft `mods/` with Fabric API.
 
-## Enable in game
+## Apple Vision provider
 
-1. Start **VisionCraftHost** (immersive + bridge).
-2. Launch Minecraft Fabric with patched Vivecraft.
-3. VR Settings → **VR Plugin** → **Apple Vision**.
-4. Enable VR.
+Already integrated in the vendored tree:
 
-## M2 acceptance
+- `common/src/main/java/org/vivecraft/client_vr/provider/apple/`
+- `common/src/main/java/visioncraft/bridge/`
+- Default `VRSettings.stereoProviderPluginID` = `APPLE_VISION`
 
-- Minecraft launches without SteamVR
-- `AppleVisionProvider` initializes when host is running
-- Fake / live pose from bridge updates HMD matrices
+## Run
+
+1. Build and run **VisionCraftHost** (`mac-host/`).
+2. Open immersive space + bridge on Mac.
+3. Launch Minecraft (Fabric) with the built mod.
+4. Enable VR (plugin should already be Apple Vision).
+
+## Upstream
+
+See [VENDORED.md](VENDORED.md) for pinned commit and merge instructions.

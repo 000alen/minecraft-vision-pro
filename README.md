@@ -22,7 +22,7 @@ See [docs/architecture.md](docs/architecture.md) for the full system design, mil
 | `docs/` | Architecture, build, latency, transport notes |
 | `bridge/` | Versioned JSON protocol + Java JNI/socket bridge |
 | `mac-host/` | macOS 26+ host app (M0/M1) |
-| `minecraft/` | Vivecraft submodule + Apple provider sources + patches |
+| `minecraft/VivecraftMod/` | **Vendored** Vivecraft fork (Apple provider + bridge in-tree) |
 | `test/` | Bridge and math unit tests |
 
 ## Quick start (development)
@@ -33,14 +33,16 @@ See [docs/architecture.md](docs/architecture.md) for the full system design, mil
 - MacBook Pro M4 + Apple Vision Pro (paired, Developer Mode)
 - Java 21+, Gradle 8+
 - Minecraft Java Edition + Fabric Loader
-- [VivecraftMod](https://github.com/Vivecraft/VivecraftMod) (git submodule)
+- [VivecraftMod](https://github.com/Vivecraft/VivecraftMod) (vendored under `minecraft/VivecraftMod/`)
 
-### 1. Clone with submodules
+### 1. Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/YOUR_ORG/visioncraft.git
-cd visioncraft
+git clone https://github.com/000alen/minecraft-vision-pro.git
+cd minecraft-vision-pro
 ```
+
+Everything needed to build is in the repo (vendored Vivecraft, no submodules).
 
 ### 2. M0 — Stereo cube on Vision Pro
 
@@ -63,11 +65,11 @@ Acceptance: left/right test patterns in correct eyes; pose messages received by 
 
 ### 4. M2+ — Vivecraft Apple provider
 
-Apply patches under `minecraft/patches/`, copy `minecraft/src/` into VivecraftMod, build Fabric mod, set VR provider to **Apple Vision** in Vivecraft settings.
+Build the vendored Fabric mod (Apple Vision is the default provider):
 
 ```bash
 cd minecraft/VivecraftMod
-./gradlew build
+./gradlew :fabric:build
 ```
 
 Run **VisionCraftHost** before launching Minecraft.

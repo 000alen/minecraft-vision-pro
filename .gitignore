@@ -10,8 +10,11 @@ DerivedData/
 *.xcuserstate
 mac-host/build/
 
-# Vivecraft submodule build outputs
-minecraft/VivecraftMod/
+# Vendored Vivecraft build outputs
+minecraft/VivecraftMod/.gradle/
+minecraft/VivecraftMod/build/
+minecraft/VivecraftMod/**/build/
+minecraft/VivecraftMod/.idea/
 
 # Local secrets
 .env

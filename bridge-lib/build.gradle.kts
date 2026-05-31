@@ -20,7 +20,7 @@ tasks.test {
 sourceSets {
     main {
         java {
-            srcDirs("../bridge/java")
+            srcDirs("../minecraft/VivecraftMod/common/src/main/java/visioncraft/bridge")
         }
     }
     test {

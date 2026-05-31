@@ -1,5 +1,7 @@
 # VisionCraft bridge protocol v1
 
+Java implementation (vendored): `minecraft/VivecraftMod/common/src/main/java/visioncraft/bridge/`
+
 Transport: **TCP**, default host `127.0.0.1`, port **19735**.
 
 All JSON messages are **one line** terminated by `\n` (UTF-8).

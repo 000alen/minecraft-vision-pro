@@ -1,4 +1,0 @@
-[submodule "minecraft/VivecraftMod"]
-	path = minecraft/VivecraftMod
-	url = https://github.com/Vivecraft/VivecraftMod.git
-	branch = main
