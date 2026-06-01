@@ -45,6 +45,32 @@ class BridgeIntegrationTest {
     }
 
     @Test
+    void clientReceivesAsymmetricViewConfig() throws Exception {
+        try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
+            host.start();
+            try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", host.getBoundPort())) {
+                bridge.connect();
+                waitForSession(bridge, 5_000);
+                waitForViewConfig(bridge, 3_000);
+
+                AppleNativeBridge.ViewConfig vc = bridge.getViewConfig();
+                assertNotNull(vc);
+                assertEquals(0.063f, vc.ipdM(), 1e-4f);
+                // Left eye: temporal (left) tangent larger than nasal (right).
+                float[] left = vc.tangentsForEye(0);
+                assertEquals(1.21f, left[0], 1e-4f);
+                assertEquals(0.93f, left[1], 1e-4f);
+                // Right eye is mirrored.
+                float[] right = vc.tangentsForEye(1);
+                assertEquals(0.93f, right[0], 1e-4f);
+                assertEquals(1.21f, right[1], 1e-4f);
+                assertEquals(1888, vc.leftWidth());
+                assertEquals(1824, vc.leftHeight());
+            }
+        }
+    }
+
+    @Test
     void recenterIncrementsCounter() throws Exception {
         try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
             host.start();
@@ -105,6 +131,17 @@ class BridgeIntegrationTest {
             Thread.sleep(20);
         }
         fail("Expected frames");
+    }
+
+    private static void waitForViewConfig(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (bridge.getViewConfig() != null) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("No view_config");
     }
 
     private static void waitForPoses(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {

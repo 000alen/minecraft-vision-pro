@@ -52,6 +52,13 @@ final class PosePublisher {
         simulatedYaw = 0
     }
 
+    /// Broadcast a pre-serialized `view_config` line (newline-terminated) to all Java
+    /// clients. Reuses the same broadcast channel as pose so ordering/threading match.
+    /// Called from the render loop; the broadcast closure marshals onto the bridge queue.
+    func publishViewConfig(_ jsonLine: String) {
+        sendToAll?(jsonLine)
+    }
+
     #if canImport(ARKit)
     @available(macOS 26.0, *)
     func update(anchor: DeviceAnchor?) {

@@ -77,6 +77,32 @@ Response:
 {"type":"recenter","version":1,"recenter_counter":5}
 ```
 
+### `view_config`
+
+The host's true per-eye view frustum and recommended render dimensions, derived from
+Compositor Services (`cp_drawable_compute_projection` / view transforms). The host sends
+this once the immersive space is rendering, on change, and as a low-rate heartbeat (~1 Hz)
+so a late-connecting Java client still receives it.
+
+```json
+{"type":"view_config","version":1,"ipd_m":0.063,"views":[{"index":0,"tangents":[1.21,0.93,1.02,1.02],"width":1888,"height":1824},{"index":1,"tangents":[0.93,1.21,1.02,1.02],"width":1888,"height":1824}]}
+```
+
+- `views[].index` — `0` = left eye, `1` = right eye (matches Vivecraft `eyeType`).
+- `views[].tangents` — `[left, right, up, down]`, the **positive** tangents of the frustum
+  half-angles (same order and sign convention as `cp_view_get_tangents`). The eye frustum
+  is asymmetric: the nasal edge tangent is smaller than the temporal edge. Java builds an
+  off-axis projection as `frustum(-left·n, right·n, -down·n, up·n, n, f)` using its own
+  near/far so the device frustum is matched without clamping Minecraft's render distance.
+- `views[].width` / `height` — the device's recommended per-eye viewport in pixels. The host
+  blits the *entire* Java eye buffer to the *entire* device viewport, so geometry is correct
+  for any Java buffer resolution; these are advisory (used only to match pixel aspect).
+- `ipd_m` — measured inter-pupillary distance in meters, from the distance between the two
+  view transforms' origins. Java uses this for eye-to-head separation when present (> 0).
+
+Until the first `view_config` arrives, Java falls back to a symmetric FOV and its configured
+IPD. Receiving a `view_config` is idempotent — the client stores the latest values.
+
 ## Clocks and timestamps
 
 There is no shared monotonic clock across the two processes, so each timestamp field

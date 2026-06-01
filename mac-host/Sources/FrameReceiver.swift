@@ -84,6 +84,10 @@ final class FrameReceiver {
                 mipmapped: false
             )
             desc.usage = [.shaderRead]
+            // On Apple Silicon (unified memory) `.shared` lets the GPU sample the
+            // CPU-written bytes directly — no managed-resource blit/sync per upload.
+            // Fall back to `.managed` on discrete-GPU Macs where shared is slower.
+            desc.storageMode = device.hasUnifiedMemory ? .shared : .managed
             guard let created = device.makeTexture(descriptor: desc) else { return existing }
             texture = created
         }

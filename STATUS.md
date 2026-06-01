@@ -71,16 +71,61 @@ Three defects from the first Minecraft playtest were root-caused and fixed in co
    GPU. Made `FrameReceiver` 3-buffered with a lock so the CPU never overwrites
    the most-recently-published pair.
 
-Known refinements to tune **after** confirming the loop is stable on device
-(deliberately not changed blind):
-- Eye buffers are `1512×1680` (aspect ≈ 0.9) and the Java projection already uses
-  that exact aspect (`AppleProjectionProvider.projectionForEye(..., aspect)`), so
-  there is no square-buffer stretch. The residual mismatch is that 0.9 may not equal
-  the precise AVP per-eye viewport aspect. Fix = send the device viewport dimensions
-  host → Java so the eye buffers match it exactly.
-- Game uses a fixed symmetric FOV (`nullvrFOV` or 100° default); AVP frustums are
-  asymmetric. Fix = send per-eye projection/tangents over the bridge so frames match
-  the device frustum.
+### 2026-05-31 evening — per-eye device-true projection over the bridge (code-grounded, untested on device)
+
+The fixed symmetric FOV / device-frustum mismatch above is now resolved in code.
+
+- **New `view_config` bridge message** (`bridge/protocol.md`): host → Java, carries
+  measured IPD plus per-eye frustum tangents `[left, right, up, down]` and the
+  recommended render `width`/`height` for each view. Sent on change and on a ~72-frame
+  heartbeat so late-connecting Java clients still converge.
+- **Host extraction** (`CompositorRenderer.publishViewConfigIfNeeded`): tangents are
+  derived from `drawable.computeProjection(viewIndex:)` by unprojecting NDC corners
+  through the inverse matrix (robust to the reverse-Z / right-up-back convention),
+  because `cp_view_get_tangents` is `API_UNAVAILABLE(macosx)`. IPD is the distance
+  between the two eye-view transform origins.
+- **Java application**: `AppleNativeBridge.ViewConfig` stores the parsed config (with
+  defensive `parseViewConfig` that ignores malformed messages). `AppleProjectionProvider
+  .projectionFromTangents` builds an off-axis `Matrix4f.frustum` using **Minecraft's own
+  near/far** (render distance unchanged), and `AppleVisionStereoRenderer.getProjectionMatrix`
+  uses it when a config is present, else falls back to the prior symmetric projection.
+  `AppleVisionProvider.getIPD()` prefers the measured IPD when within 0.04–0.085 m.
+- **Buffer aspect** is intentionally left at `1512×1680`. Geometry is now correct
+  regardless of buffer aspect (the host blits each eye buffer 1:1 into its device
+  viewport), so matching the exact device pixel aspect is only a sampling-quality
+  refinement, deferred to avoid resizing render targets blind.
+- Verified: view 0 → `eyeIndex 0` → left texture (`Composite.metal`), so host view[0]
+  = left eye = Java `eyeType 0` = `view_config` index 0 — consistent end to end.
+- Builds green: 12 bridge tests pass (incl. `clientReceivesAsymmetricViewConfig`),
+  Swift host `BUILD SUCCEEDED`, Fabric mod `BUILD SUCCESSFUL`.
+
+### 2026-05-31 night — Apple host best-practices + performance audit (code-grounded)
+
+Audited the Swift host against the CompositorServices/Metal/ARKit SDK headers
+(`MacOSX.sdk/.../CompositorServices.framework/Headers/{frame,drawable,cp_types}.h`).
+
+- **Frame-loop ordering fixed** (`CompositorRenderer.renderNextFrame`): now follows
+  the documented timeline — `startUpdate`/`endUpdate` → `predictTiming` → wait on
+  `optimalInputTime` → `startSubmission` → `queryDrawables`. Previously the drawable
+  was queried *before* `startSubmission()`; the header says query drawables "when
+  you're ready to encode" (the submission phase). `predictTiming()` is still called
+  before `queryDrawables()` (required) and all pose work stays in the submission phase.
+- **ARKit teardown** (`detach()`): now calls `ARKitSession.stop()` so the world-tracking
+  provider doesn't keep running after the immersive space closes.
+- **Texture storage mode** (`FrameReceiver`): eye textures are now `.shared` on
+  unified-memory Apple Silicon (the AVP host class) so the GPU samples CPU-written
+  bytes with no managed-resource sync; falls back to `.managed` on discrete GPUs.
+- **Receive hot path** (`JavaBridgeServer`): pass the buffer slices straight to the
+  synchronous frame handler instead of allocating two ~10 MB/eye `Data` copies per
+  frame before the texture upload.
+- **Dead code removed**: unused system-default `device` property, `blit(...)`, and
+  `clearPassDescriptor(...)`.
+- Confirmed `drawable.computeProjection(viewIndex:)` uses the default `.rightUpBack`
+  (+Y up) convention, matching the tangent extraction.
+- Swift host still `BUILD SUCCEEDED`.
+
+Biggest remaining performance lever is unchanged and architectural: the CPU
+read-back frame path (M6 IOSurface / zero-copy), intentionally deferred.
 
 ## Known gaps
 
@@ -88,6 +133,9 @@ Known refinements to tune **after** confirming the loop is stable on device
 2. Pose uses `WorldTrackingProvider` when a remote Vision Pro device identifier is available; otherwise it falls back to simulated pose for bridge preflight.
 3. Frame path uses **CPU readback** (slow; M6 IOSurface)
 4. OpenVR JAR may still load with LWJGL; Apple path does not call `MCOpenVR`
+5. Eye render buffers are fixed at `1512×1680`; not yet resized to the host's
+   recommended `view_config` dimensions (sampling-quality only — geometry is correct).
+6. No real controller/hand input, haptics, or spatial audio on the Apple path yet.
 
 ## Coordinate tuning
 

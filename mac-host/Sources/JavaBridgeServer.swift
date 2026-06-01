@@ -240,16 +240,16 @@ private final class BridgeConnection {
         let total = leftLen + rightLen
         guard buffer.count >= total else { return false }
 
-        let leftData = buffer.prefix(leftLen)
-        let rightData = buffer.dropFirst(leftLen).prefix(rightLen)
-        buffer.removeFirst(total)
-
         // Frame the payload using byte_length (authoritative for the wire), but only
         // hand a frame to the renderer when the declared bytes actually match the
         // RGBA8 dimensions. A mismatch is dropped (per protocol.md) without desyncing.
         if leftLen == lw * lh * 4 && rightLen == rw * rh * 4 && lw == rw && lh == rh {
-            onFrame?(Data(leftData), Data(rightData), lw, lh, frameId)
+            // `onFrame` consumes synchronously (texture upload), so pass the buffer
+            // slices directly — no extra ~10 MB/eye copy before the GPU upload.
+            // Compaction below happens only after the handler returns.
+            onFrame?(buffer.prefix(leftLen), buffer.dropFirst(leftLen).prefix(rightLen), lw, lh, frameId)
         }
+        buffer.removeFirst(total)
         return true
     }
 }

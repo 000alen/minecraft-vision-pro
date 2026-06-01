@@ -10,6 +10,7 @@ import org.vivecraft.client_vr.provider.VRRenderer;
 import org.vivecraft.client_vr.render.RenderConfigException;
 import org.vivecraft.client_vr.render.helpers.RenderHelper;
 import org.vivecraft.client_vr.settings.VRSettings;
+import visioncraft.bridge.AppleNativeBridge;
 
 import java.io.IOException;
 
@@ -43,6 +44,13 @@ public class AppleVisionStereoRenderer extends VRRenderer {
 
     @Override
     protected Matrix4f getProjectionMatrix(int eyeType, float nearClip, float farClip) {
+        AppleNativeBridge.ViewConfig viewConfig = provider.getBridge().getViewConfig();
+        if (viewConfig != null) {
+            // Match the device's true asymmetric frustum exactly (no distortion).
+            return AppleProjectionProvider.projectionFromTangents(
+                viewConfig.tangentsForEye(eyeType), nearClip, farClip);
+        }
+        // Fallback before the host reports a view_config: symmetric FOV at buffer aspect.
         float aspect = eyeHeight > 0 ? (float) eyeWidth / (float) eyeHeight : 1.0f;
         return AppleProjectionProvider.projectionForEye(eyeType, nearClip, farClip, aspect);
     }

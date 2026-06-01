@@ -206,6 +206,12 @@ public class AppleVisionProvider extends MCVR {
 
     @Override
     public float getIPD() {
+        // Prefer the device-measured IPD (from view_config); fall back to the configured
+        // value before the host has reported one. A sane bound rejects garbage values.
+        AppleNativeBridge.ViewConfig viewConfig = bridge.getViewConfig();
+        if (viewConfig != null && viewConfig.ipdM() > 0.04f && viewConfig.ipdM() < 0.085f) {
+            return viewConfig.ipdM();
+        }
         return this.dh.vrSettings.nullvrIPD;
     }
 

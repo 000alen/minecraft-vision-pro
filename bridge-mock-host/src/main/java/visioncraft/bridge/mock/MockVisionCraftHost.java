@@ -92,6 +92,7 @@ public final class MockVisionCraftHost implements AutoCloseable {
             BufferedOutputStream out = new BufferedOutputStream(c.getOutputStream())
         ) {
             sendJson(out, sessionJson("ready"));
+            sendJson(out, VIEW_CONFIG_JSON);
             AtomicInteger recenterCounter = new AtomicInteger(0);
             AtomicBoolean poseRunning = new AtomicBoolean(true);
             Thread poseThread = new Thread(() -> poseLoop(out, recenterCounter, poseRunning), "mock-pose");
@@ -221,6 +222,14 @@ public final class MockVisionCraftHost implements AutoCloseable {
     private static String sessionJson(String state) {
         return String.format("{\"type\":\"session\",\"version\":1,\"state\":\"%s\"}", state);
     }
+
+    /** Representative asymmetric per-eye frustum (nasal edge tangent smaller than temporal). */
+    private static final String VIEW_CONFIG_JSON =
+        "{\"type\":\"view_config\",\"version\":1,\"ipd_m\":0.063," +
+            "\"views\":[" +
+            "{\"index\":0,\"tangents\":[1.21,0.93,1.02,1.02],\"width\":1888,\"height\":1824}," +
+            "{\"index\":1,\"tangents\":[0.93,1.21,1.02,1.02],\"width\":1888,\"height\":1824}" +
+            "]}";
 
     public MockHostStats getStats() {
         return stats;

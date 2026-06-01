@@ -38,6 +38,7 @@ public final class AppleNativeBridge implements AutoCloseable {
 
     private volatile Pose latestPose = Pose.identity();
     private volatile SessionState sessionState = SessionState.CLOSED;
+    private volatile ViewConfig latestViewConfig = null;
 
     private Socket socket;
     private BufferedOutputStream out;
@@ -150,6 +151,12 @@ public final class AppleNativeBridge implements AutoCloseable {
                     BridgeMetrics.get().onPose(ts);
                 }
                 case "session" -> sessionState = SessionState.fromString(obj.get("state").getAsString());
+                case "view_config" -> {
+                    ViewConfig parsed = parseViewConfig(obj);
+                    if (parsed != null) {
+                        latestViewConfig = parsed;
+                    }
+                }
                 case "recenter" -> {
                     if (obj.has("recenter_counter")) {
                         recenterCounter.set(obj.get("recenter_counter").getAsInt());
@@ -170,6 +177,41 @@ public final class AppleNativeBridge implements AutoCloseable {
             out[i] = arr.get(i).getAsFloat();
         }
         return out;
+    }
+
+    /**
+     * Parse a {@code view_config} object into per-eye tangents/dimensions. Returns
+     * {@code null} (caller keeps the previous config) if the message is incomplete or both
+     * eyes cannot be resolved, so a malformed update never clobbers a good config.
+     */
+    private static ViewConfig parseViewConfig(JsonObject obj) {
+        if (!obj.has("views")) {
+            return null;
+        }
+        com.google.gson.JsonArray views = obj.getAsJsonArray("views");
+        float[] leftTan = null, rightTan = null;
+        int leftW = 0, leftH = 0, rightW = 0, rightH = 0;
+        for (int i = 0; i < views.size(); i++) {
+            JsonObject view = views.get(i).getAsJsonObject();
+            int index = view.get("index").getAsInt();
+            float[] tan = parseFloatArray(view.getAsJsonArray("tangents"), 4);
+            int w = view.has("width") ? view.get("width").getAsInt() : 0;
+            int h = view.has("height") ? view.get("height").getAsInt() : 0;
+            if (index == 0) {
+                leftTan = tan;
+                leftW = w;
+                leftH = h;
+            } else if (index == 1) {
+                rightTan = tan;
+                rightW = w;
+                rightH = h;
+            }
+        }
+        if (leftTan == null || rightTan == null) {
+            return null;
+        }
+        float ipd = obj.has("ipd_m") ? obj.get("ipd_m").getAsFloat() : 0f;
+        return new ViewConfig(leftTan, rightTan, leftW, leftH, rightW, rightH, ipd);
     }
 
     public synchronized void sendFrame(FramePacket frame) throws IOException {
@@ -247,6 +289,11 @@ public final class AppleNativeBridge implements AutoCloseable {
         return latestPose;
     }
 
+    /** Latest device frustum/IPD from the host, or {@code null} if none received yet. */
+    public ViewConfig getViewConfig() {
+        return latestViewConfig;
+    }
+
     public int getRecenterCounter() {
         return recenterCounter.get();
     }
@@ -283,6 +330,27 @@ public final class AppleNativeBridge implements AutoCloseable {
 
         public boolean isValid() {
             return "valid".equals(trackingState);
+        }
+    }
+
+    /**
+     * Device per-eye view frustum reported by the host. {@code tangents} are the positive
+     * tangents of the frustum half-angles in {@code [left, right, up, down]} order (same
+     * convention as Compositor Services). Width/height are the device's recommended per-eye
+     * viewport in pixels (advisory). {@code ipdM} is the measured inter-pupillary distance.
+     */
+    public record ViewConfig(
+        float[] leftTangents,
+        float[] rightTangents,
+        int leftWidth,
+        int leftHeight,
+        int rightWidth,
+        int rightHeight,
+        float ipdM
+    ) {
+        /** Tangents for the given eye (0 = left, else right). */
+        public float[] tangentsForEye(int eyeType) {
+            return eyeType == 0 ? leftTangents : rightTangents;
         }
     }
 
