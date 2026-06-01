@@ -7,8 +7,5 @@ import org.vivecraft.client_vr.provider.HapticScheduler;
 public class AppleVisionHapticScheduler extends HapticScheduler {
     @Override
     public void queueHapticPulse(ControllerType controller, float durationSeconds, float frequency,
-        float amplitude) {}
-
-    @Override
-    public void queueHapticBuffer(ControllerType controller, byte[] buffer) {}
+        float amplitude, float delaySeconds) {}
 }

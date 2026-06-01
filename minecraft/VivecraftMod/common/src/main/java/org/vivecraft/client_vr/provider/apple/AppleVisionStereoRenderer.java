@@ -11,6 +11,8 @@ import org.vivecraft.client_vr.render.RenderConfigException;
 import org.vivecraft.client_vr.render.helpers.RenderHelper;
 import org.vivecraft.client_vr.settings.VRSettings;
 
+import java.io.IOException;
+
 /**
  * Stereo renderer that submits frames to VisionCraftHost via {@link AppleFrameSubmitter}.
  */

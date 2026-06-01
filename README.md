@@ -31,7 +31,7 @@ See [docs/architecture.md](docs/architecture.md) for the full system design, mil
 
 - macOS 26+ (Tahoe), visionOS 26+, Xcode 26+
 - MacBook Pro M4 + Apple Vision Pro (paired, Developer Mode)
-- Java 21+, Gradle 8+
+- Java 21+ to run bridge tests; the vendored Vivecraft Gradle build resolves its requested Java toolchain.
 - Minecraft Java Edition + Fabric Loader
 - [VivecraftMod](https://github.com/Vivecraft/VivecraftMod) (vendored under `minecraft/VivecraftMod/`)
 
@@ -51,7 +51,7 @@ open mac-host/VisionCraftHost.xcodeproj
 # Run on Mac; start immersive session on Vision Pro
 ```
 
-Acceptance: stereoscopic cube, head-tracked view, 10 minutes stable. **If M0 fails, stop — the architecture is blocked.**
+Acceptance: stereoscopic content and head-tracked view on Vision Pro. The long wear test is deferred while we move toward playable Minecraft.
 
 ### 3. M1 — Java ↔ native bridge
 
@@ -72,7 +72,15 @@ cd minecraft/VivecraftMod
 ./gradlew :fabric:build
 ```
 
+The Fabric jar is emitted to `minecraft/VivecraftMod/build/libs/vivecraft-26.1.2-1.3.10-fabric.jar`.
 Run **VisionCraftHost** before launching Minecraft.
+
+### 5. First playable attempt
+
+1. Install Fabric Loader for Minecraft `26.1.2`.
+2. Put `minecraft/VivecraftMod/build/libs/vivecraft-26.1.2-1.3.10-fabric.jar` in the Fabric profile's `mods/` directory.
+3. Launch `VisionCraftHost`, start the bridge on port `19735`, and open the immersive space.
+4. Launch the Fabric profile. The vendored Vivecraft default provider is `APPLE_VISION`, so it should connect to `VisionCraftHost` instead of SteamVR/OpenVR.
 
 ## Implementation order (ASAP)
 
@@ -90,10 +98,10 @@ See [STATUS.md](STATUS.md) for milestone progress and hardware validation steps.
 
 | ID | Goal | Status |
 |----|------|--------|
-| M0 | Apple spatial rendering proof | Scaffolded — verify on device |
-| M1 | Java ↔ native bridge | Scaffolded — run bridge-test |
-| M2 | Fake Apple provider, no SteamVR | Scaffolded — integrate patches |
-| M3 | Stereo menu on Vision Pro | Not started |
+| M0 | Apple spatial rendering proof | Visual + head tracking passed |
+| M1 | Java ↔ native bridge | Synthetic frames + pose validated |
+| M2 | Fake Apple provider, no SteamVR | Fabric mod builds with Apple provider default |
+| M3 | Stereo menu on Vision Pro | Next playtest target |
 | M4 | In-world head tracking | Not started |
 | M5 | Playable survival MVP | Not started |
 | M6 | Optimization pass | Not started |

@@ -4,7 +4,8 @@ import SwiftUI
 /// Requires macOS 26+ for RemoteImmersiveSpace / Compositor Services.
 @main
 struct VisionCraftHostApp: App {
-    @StateObject private var appModel = VisionCraftAppModel()
+    @State private var appModel = VisionCraftAppModel()
+    @State private var immersionStyle: ImmersionStyle = .full
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +18,7 @@ struct VisionCraftHostApp: App {
             RemoteImmersiveSpace(id: VisionCraftImmersiveSpace.id) {
                 VisionCraftImmersiveContent(appModel: appModel)
             }
+            .immersionStyle(selection: $immersionStyle, in: .full)
         }
         #endif
     }

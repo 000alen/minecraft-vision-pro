@@ -14,7 +14,7 @@ final class JavaBridgeServer {
 
     func start(port: Int) throws {
         let params = NWParameters.tcp
-        listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: UInt16(port))!)
+        listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: UInt16(port)))
         listener?.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
