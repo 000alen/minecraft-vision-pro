@@ -203,6 +203,12 @@ private final class BridgeConnection {
             if line.contains("\"type\":\"frame\"") {
                 if let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
                     pendingMeta = json
+                } else {
+                    // A frame header we can't parse means we can't know the binary
+                    // payload length that follows, so the stream is desynced. Drop the
+                    // connection rather than scan the binary payload as if it were text.
+                    close()
+                    break
                 }
             } else {
                 onLine?(line)

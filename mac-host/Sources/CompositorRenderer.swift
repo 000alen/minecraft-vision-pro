@@ -14,6 +14,15 @@ import SwiftUI
 
 /// Metal stereo renderer — M0 debug cube or M1 Java-submitted frames.
 final class CompositorRenderer {
+    /// Maximum number of GPU frames whose command buffers (and the drawables +
+    /// per-eye textures they retain) may be outstanding at once. Bounds memory if
+    /// GPU completion lags submission — critical on the remote Vision Pro path
+    /// where presentation happens over the network. Without this bound, command
+    /// buffers accumulate unbounded and the process is OOM-killed (observed
+    /// hundreds of GB resident before a system stall).
+    private static let maxFramesInFlight = 3
+    private let inFlightSemaphore = DispatchSemaphore(value: CompositorRenderer.maxFramesInFlight)
+
     private var commandQueue: MTLCommandQueue?
     private var frameReceiver: FrameReceiver?
     private var debugPipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
@@ -194,8 +203,25 @@ final class CompositorRenderer {
         }
 
         drawable.encodePresent(commandBuffer: commandBuffer)
+
+        // Throttle GPU submission to `maxFramesInFlight`. A timed wait (rather than
+        // an unbounded one) lets the loop re-check `renderLoopRunning` for clean
+        // teardown, and degrades to dropping frames — not leaking them — if GPU
+        // completion stalls entirely (e.g. the remote device disconnects mid-frame).
+        if inFlightSemaphore.wait(timeout: .now() + 0.5) == .timedOut {
+            updateDiagnostics(lastRenderError: "frame in-flight limit timeout; dropping frame")
+            // Balance the submission we opened above so the compositor's frame
+            // accounting stays consistent; the un-committed command buffer presents
+            // nothing and is released with this frame.
+            frame.endSubmission()
+            return
+        }
+        // Capture the semaphore (not self) so the signal is guaranteed to pair with
+        // the wait above even if the renderer is detached before the GPU completes.
+        let semaphore = inFlightSemaphore
         commandBuffer.addCompletedHandler { [weak self] buffer in
             self?.updateDiagnostics(lastCommandBufferStatus: "\(buffer.status.rawValue)")
+            semaphore.signal()
         }
         commandBuffer.commit()
         frame.endSubmission()

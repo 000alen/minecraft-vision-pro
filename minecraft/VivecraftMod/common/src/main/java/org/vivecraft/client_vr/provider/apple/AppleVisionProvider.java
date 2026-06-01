@@ -32,6 +32,13 @@ public class AppleVisionProvider extends MCVR {
 
     private static final float CROSSHAIR_FORWARD_BLOCKS = 0.75f;
 
+    // Pinch → mouse hysteresis: engage on a firm pinch, hold until clearly released, so a
+    // hand hovering near the threshold can't chatter the attack/use action.
+    private static final float PINCH_ENGAGE = 0.7f;
+    private static final float PINCH_RELEASE = 0.4f;
+    private boolean rightPinchHeld = false;
+    private boolean leftPinchHeld = false;
+
     private final AppleNativeBridge bridge = new AppleNativeBridge(BridgeSettings.host(), BridgeSettings.port());
     private final AppleSessionState sessionState = new AppleSessionState();
     private final ApplePoseProvider poseProvider;
@@ -106,6 +113,19 @@ public class AppleVisionProvider extends MCVR {
 
     @Override
     public void destroy() {
+        // Release any pinch-held mouse button so VR teardown can't leave input stuck down.
+        if (rightPinchHeld) {
+            InputSimulator.releaseMouse(GLFW.GLFW_MOUSE_BUTTON_LEFT);
+            rightPinchHeld = false;
+        }
+        if (leftPinchHeld) {
+            InputSimulator.releaseMouse(GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+            leftPinchHeld = false;
+        }
+        if (frameSubmitter != null) {
+            frameSubmitter.close();
+            frameSubmitter = null;
+        }
         bridge.close();
         super.destroy();
         this.initialized = false;
@@ -159,6 +179,40 @@ public class AppleVisionProvider extends MCVR {
     @Override
     public void processInputs() {
         this.ignorePressesNextFrame = false;
+        updateHandPinch();
+    }
+
+    /**
+     * Map ARKit hand pinches to mouse buttons (seated/HMD-aim profile): right pinch =
+     * primary (attack/mine, GUI click), left pinch = secondary (use/place). Edge-triggered
+     * with hysteresis so the button is pressed once on engage and held — driving continuous
+     * mining — until the pinch releases or the hand stops tracking.
+     */
+    private void updateHandPinch() {
+        // If the host link drops mid-pinch, fall back to "no hands" so any held button is
+        // released this frame rather than sticking down.
+        AppleNativeBridge.HandState hands = (bridge.isConnected() && sessionState.isReady())
+            ? bridge.getHands()
+            : AppleNativeBridge.HandState.empty();
+        rightPinchHeld = applyPinch(hands.right(), rightPinchHeld, GLFW.GLFW_MOUSE_BUTTON_LEFT);
+        leftPinchHeld = applyPinch(hands.left(), leftPinchHeld, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+    }
+
+    private boolean applyPinch(AppleNativeBridge.Hand hand, boolean held, int mouseButton) {
+        final boolean wantDown;
+        if (!hand.tracked()) {
+            wantDown = false;
+        } else if (held) {
+            wantDown = hand.pinch() > PINCH_RELEASE;
+        } else {
+            wantDown = hand.pinch() > PINCH_ENGAGE;
+        }
+        if (wantDown && !held) {
+            InputSimulator.pressMouse(mouseButton);
+        } else if (!wantDown && held) {
+            InputSimulator.releaseMouse(mouseButton);
+        }
+        return wantDown;
     }
 
     @Override

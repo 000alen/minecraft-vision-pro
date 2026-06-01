@@ -103,6 +103,40 @@ so a late-connecting Java client still receives it.
 Until the first `view_config` arrives, Java falls back to a symmetric FOV and its configured
 IPD. Receiving a `view_config` is idempotent — the client stores the latest values.
 
+### `hand`
+
+Per-hand tracking (pinch + advisory wrist pose). A host publishes this on the same
+channel/cadence as `pose` (heartbeat at the pose rate) whenever hand tracking is supported
+and running. Hands that are not currently tracked are reported with `tracked:false`.
+
+> **Platform note.** ARKit `HandTrackingProvider` is a local, on-device visionOS feature and is
+> `unavailable` on macOS. The current **macOS Spatial Rendering / RemoteImmersiveSpace host vends
+> head pose only** (via `WorldTrackingProvider`) and therefore does **not** emit `hand`. This
+> message is the stable wire contract for hand input: it is emitted today by the mock host
+> (`MockVisionCraftHost`, for tests) and is the integration point for a future visionOS-native
+> host that runs `HandTrackingProvider` on-device and streams pinch over this bridge. The Java
+> client already consumes it (right pinch → primary, left pinch → secondary); when no host emits
+> `hand`, both hands stay untracked and contribute no input.
+
+```json
+{"type":"hand","version":1,"timestamp_ns":123456789,"hands":[{"chirality":"left","tracked":true,"position_m":[-0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.0},{"chirality":"right","tracked":true,"position_m":[0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.92}]}
+```
+
+- `hands[].chirality` — `left` | `right`. Either or both may be present.
+- `hands[].tracked` — `false` when the hand left the field of view; consumers must treat an
+  untracked hand as "no input" (e.g. release any held pinch action).
+- `hands[].pinch` — index-tip↔thumb-tip pinch strength in `0..1` (`1` = fully pinched).
+  Computed host-side from the joint distance; the client applies its own hysteresis to turn
+  this into a discrete press so it never chatters at the threshold.
+- `hands[].position_m` — wrist position in the same tracking space as `pose.position_m`
+  (meters). **Advisory** today: the seated Apple profile aims with the head, so the client
+  consumes only `pinch`. Reserved for a future hand-aimed (non-seated) profile.
+- `hands[].orientation_xyzw` — raw ARKit wrist orientation (world space), JOML-compatible.
+  **Advisory**, same rationale as `position_m`.
+
+The seated client maps `right` pinch → primary action (attack/mine, GUI click) and `left`
+pinch → secondary action (use/place). A missing or untracked hand contributes no input.
+
 ## Clocks and timestamps
 
 There is no shared monotonic clock across the two processes, so each timestamp field

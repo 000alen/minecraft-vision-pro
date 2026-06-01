@@ -12,14 +12,15 @@ import org.vivecraft.client_vr.render.helpers.RenderHelper;
 import org.vivecraft.client_vr.settings.VRSettings;
 import visioncraft.bridge.AppleNativeBridge;
 
-import java.io.IOException;
-
 /**
  * Stereo renderer that submits frames to VisionCraftHost via {@link AppleFrameSubmitter}.
  */
 public class AppleVisionStereoRenderer extends VRRenderer {
     private static final int DEFAULT_WIDTH = 1512;
     private static final int DEFAULT_HEIGHT = 1680;
+    /** Clamp device-reported dims to a sane range so a garbage view_config can't OOM the GPU. */
+    private static final int MIN_DIM = 512;
+    private static final int MAX_DIM = 4096;
 
     private final AppleVisionProvider provider;
     private final AppleFrameSubmitter submitter;
@@ -35,11 +36,49 @@ public class AppleVisionStereoRenderer extends VRRenderer {
     @Override
     public Tuple<Integer, Integer> getRenderTextureSizes() {
         if (this.resolution == null) {
-            this.resolution = new Tuple<>(eyeWidth, eyeHeight);
-            VRSettings.LOGGER.info("Vivecraft: Apple Vision render res {}x{}", eyeWidth, eyeHeight);
+            int[] dims = desiredEyeDims();
+            this.eyeWidth = dims[0];
+            this.eyeHeight = dims[1];
+            this.resolution = new Tuple<>(this.eyeWidth, this.eyeHeight);
+            VRSettings.LOGGER.info("Vivecraft: Apple Vision render res {}x{}", this.eyeWidth, this.eyeHeight);
             this.ss = -1.0F;
         }
         return this.resolution;
+    }
+
+    /**
+     * Per-eye render dimensions: the device's recommended {@code view_config} size when the
+     * host has reported it (1:1 sampling on the headset), else a sensible default. Values are
+     * clamped to {@code [MIN_DIM, MAX_DIM]}.
+     */
+    private int[] desiredEyeDims() {
+        AppleNativeBridge.ViewConfig vc = provider.getBridge().getViewConfig();
+        if (vc != null && vc.leftWidth() >= MIN_DIM && vc.leftHeight() >= MIN_DIM) {
+            return new int[]{clampDim(vc.leftWidth()), clampDim(vc.leftHeight())};
+        }
+        return new int[]{DEFAULT_WIDTH, DEFAULT_HEIGHT};
+    }
+
+    private static int clampDim(int v) {
+        return Math.max(MIN_DIM, Math.min(MAX_DIM, v));
+    }
+
+    /**
+     * Adopt the device-recommended render size once the host reports it (or if it changes).
+     * Updates {@link #resolution} and flags a framebuffer reinit so the next frame rebuilds
+     * the eye buffers at the new size. Stable input ⇒ fires at most once.
+     */
+    private void applyDeviceResolutionIfChanged() {
+        int[] dims = desiredEyeDims();
+        if (dims[0] != this.eyeWidth || dims[1] != this.eyeHeight) {
+            VRSettings.LOGGER.info("Vivecraft: Apple Vision render res -> {}x{} (device view_config)",
+                dims[0], dims[1]);
+            this.eyeWidth = dims[0];
+            this.eyeHeight = dims[1];
+            this.resolution = new Tuple<>(dims[0], dims[1]);
+            this.ss = -1.0F;
+            this.reinitFrameBuffers = true;
+        }
     }
 
     @Override
@@ -79,14 +118,11 @@ public class AppleVisionStereoRenderer extends VRRenderer {
     public void endFrame() throws RenderConfigException {
         float near = 0.05f;
         float far = this.lastFarClip > 0 ? this.lastFarClip : 512f;
-        try {
-            submitter.submitEyeTextures(LeftEyeTextureId, RightEyeTextureId, eyeWidth, eyeHeight, near, far);
-        } catch (IOException e) {
-            throw new RenderConfigException(
-                net.minecraft.network.chat.Component.literal("VisionCraft bridge error"),
-                net.minecraft.network.chat.Component.literal(e.getMessage() != null ? e.getMessage() : "I/O error")
-            );
-        }
+        // submitEyeTextures never blocks on the network: the readback is queued to the
+        // async sender thread, so the render thread is not coupled to socket backpressure.
+        submitter.submitEyeTextures(LeftEyeTextureId, RightEyeTextureId, eyeWidth, eyeHeight, near, far);
+        // Pick up the device-recommended render size once the host reports it (next frame).
+        applyDeviceResolutionIfChanged();
         GL11.glFlush();
     }
 
@@ -103,6 +139,9 @@ public class AppleVisionStereoRenderer extends VRRenderer {
     @Override
     protected void destroyBuffers() {
         super.destroyBuffers();
+        // PBOs are GL objects owned by the submitter; free them here (render thread, context
+        // current). They are re-created lazily at the new size on the next submit.
+        submitter.releaseGlResources();
         if (LeftEyeTextureId > -1) {
             GlStateManager._deleteTexture(LeftEyeTextureId);
             LeftEyeTextureId = -1;

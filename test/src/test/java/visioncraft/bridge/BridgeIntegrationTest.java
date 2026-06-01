@@ -71,6 +71,26 @@ class BridgeIntegrationTest {
     }
 
     @Test
+    void clientReceivesHandPinch() throws Exception {
+        try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
+            host.start();
+            try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", host.getBoundPort())) {
+                bridge.connect();
+                waitForSession(bridge, 5_000);
+                waitForHands(bridge, 3_000);
+
+                AppleNativeBridge.HandState hands = bridge.getHands();
+                assertTrue(hands.right().tracked());
+                assertEquals(0.92f, hands.right().pinch(), 1e-4f);
+                assertTrue(hands.left().tracked());
+                assertEquals(0.05f, hands.left().pinch(), 1e-4f);
+                // Advisory wrist position round-trips.
+                assertEquals(0.2f, hands.right().positionM()[0], 1e-4f);
+            }
+        }
+    }
+
+    @Test
     void recenterIncrementsCounter() throws Exception {
         try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
             host.start();
@@ -142,6 +162,17 @@ class BridgeIntegrationTest {
             Thread.sleep(20);
         }
         fail("No view_config");
+    }
+
+    private static void waitForHands(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (bridge.getHands().right().tracked() || bridge.getHands().left().tracked()) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("No hand message");
     }
 
     private static void waitForPoses(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {

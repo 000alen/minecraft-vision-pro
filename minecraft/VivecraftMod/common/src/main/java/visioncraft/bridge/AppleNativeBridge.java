@@ -39,6 +39,7 @@ public final class AppleNativeBridge implements AutoCloseable {
     private volatile Pose latestPose = Pose.identity();
     private volatile SessionState sessionState = SessionState.CLOSED;
     private volatile ViewConfig latestViewConfig = null;
+    private volatile HandState latestHands = HandState.empty();
 
     private Socket socket;
     private BufferedOutputStream out;
@@ -157,6 +158,12 @@ public final class AppleNativeBridge implements AutoCloseable {
                         latestViewConfig = parsed;
                     }
                 }
+                case "hand" -> {
+                    HandState parsed = parseHands(obj);
+                    if (parsed != null) {
+                        latestHands = parsed;
+                    }
+                }
                 case "recenter" -> {
                     if (obj.has("recenter_counter")) {
                         recenterCounter.set(obj.get("recenter_counter").getAsInt());
@@ -212,6 +219,39 @@ public final class AppleNativeBridge implements AutoCloseable {
         }
         float ipd = obj.has("ipd_m") ? obj.get("ipd_m").getAsFloat() : 0f;
         return new ViewConfig(leftTan, rightTan, leftW, leftH, rightW, rightH, ipd);
+    }
+
+    /**
+     * Parse a {@code hand} message into a {@link HandState}. Returns {@code null} (caller
+     * keeps the previous state) only if the {@code hands} array is absent. Hands not present
+     * in the message default to untracked, so a one-handed update releases the other hand.
+     */
+    private static HandState parseHands(JsonObject obj) {
+        if (!obj.has("hands")) {
+            return null;
+        }
+        com.google.gson.JsonArray hands = obj.getAsJsonArray("hands");
+        Hand left = Hand.untracked();
+        Hand right = Hand.untracked();
+        for (int i = 0; i < hands.size(); i++) {
+            JsonObject h = hands.get(i).getAsJsonObject();
+            if (!h.has("chirality")) {
+                continue;
+            }
+            boolean tracked = h.has("tracked") && h.get("tracked").getAsBoolean();
+            float pinch = h.has("pinch") ? h.get("pinch").getAsFloat() : 0f;
+            float[] pos = h.has("position_m") ? parseFloatArray(h.getAsJsonArray("position_m"), 3)
+                : new float[]{0f, 0f, 0f};
+            float[] ori = h.has("orientation_xyzw") ? parseFloatArray(h.getAsJsonArray("orientation_xyzw"), 4)
+                : new float[]{0f, 0f, 0f, 1f};
+            Hand hand = new Hand(tracked, pinch, pos, ori);
+            if ("left".equals(h.get("chirality").getAsString())) {
+                left = hand;
+            } else {
+                right = hand;
+            }
+        }
+        return new HandState(left, right);
     }
 
     public synchronized void sendFrame(FramePacket frame) throws IOException {
@@ -294,6 +334,11 @@ public final class AppleNativeBridge implements AutoCloseable {
         return latestViewConfig;
     }
 
+    /** Latest per-hand tracking state. Never {@code null}; both hands untracked until reported. */
+    public HandState getHands() {
+        return latestHands;
+    }
+
     public int getRecenterCounter() {
         return recenterCounter.get();
     }
@@ -351,6 +396,29 @@ public final class AppleNativeBridge implements AutoCloseable {
         /** Tangents for the given eye (0 = left, else right). */
         public float[] tangentsForEye(int eyeType) {
             return eyeType == 0 ? leftTangents : rightTangents;
+        }
+    }
+
+    /**
+     * A single hand's tracking state. {@code positionM} (wrist, meters) and
+     * {@code orientationXyzw} (raw ARKit wrist orientation) are advisory — the seated profile
+     * aims with the head and consumes only {@code pinch} (0..1 strength). See protocol docs.
+     */
+    public record Hand(
+        boolean tracked,
+        float pinch,
+        float[] positionM,
+        float[] orientationXyzw
+    ) {
+        public static Hand untracked() {
+            return new Hand(false, 0f, new float[]{0f, 0f, 0f}, new float[]{0f, 0f, 0f, 1f});
+        }
+    }
+
+    /** Both hands' latest state. */
+    public record HandState(Hand left, Hand right) {
+        public static HandState empty() {
+            return new HandState(Hand.untracked(), Hand.untracked());
         }
     }
 

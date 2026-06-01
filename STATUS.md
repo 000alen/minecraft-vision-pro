@@ -66,6 +66,18 @@ Three defects from the first Minecraft playtest were root-caused and fixed in co
    block with no run loop, so per-frame autoreleased Metal objects (command
    buffers, drawables, encoders) never drained. Wrapped each loop iteration in
    `autoreleasepool`.
+2b. **OOM crash, second cause (~259 GB, observed on the live remote AVP path).**
+   Even with the autorelease pool, the render loop had **no frames-in-flight
+   bound**: it committed a command buffer and immediately looped. Each committed
+   buffer retains its drawable (per-eye color ~65 MB + depth ~32 MB) until its GPU
+   completion handler fires. On the **remote** Vision Pro path presentation happens
+   over the network, so completion lags submission and command buffers accumulate
+   unbounded (`~16.6k submitted × ~16 MB ≈ 259 GB`). Added the canonical Metal
+   throttle: a `DispatchSemaphore(value: 3)` waited before `commit()` and signaled
+   in the completion handler. A timed wait (0.5 s) degrades to *dropping* frames —
+   not leaking them — and lets the loop tear down cleanly if completion stalls
+   entirely. Also hardened `JavaBridgeServer`: an unparseable `frame` header now
+   drops the connection instead of scanning the binary payload as text (desync).
 3. **Flicker / tearing.** `FrameReceiver.upload()` (network thread) called
    `texture.replace()` on the same texture the render thread was sampling on the
    GPU. Made `FrameReceiver` 3-buffered with a lock so the CPU never overwrites
@@ -127,15 +139,84 @@ Audited the Swift host against the CompositorServices/Metal/ARKit SDK headers
 Biggest remaining performance lever is unchanged and architectural: the CPU
 read-back frame path (M6 IOSurface / zero-copy), intentionally deferred.
 
+## Client frame-submit audit (Java)
+
+The Java submit path (`AppleFrameSubmitter` + new `AsyncFrameSender`) was hardened
+for performance and reliability while on-device testing is deferred:
+
+- **Off-thread send.** The blocking ~20 MB socket write moved off the render thread
+  to a dedicated `AsyncFrameSender` thread. `endFrame()` no longer stalls on network
+  backpressure, so a slow host can't induce render-thread frame hitches.
+- **Latest-frame-wins.** If a newer frame is committed while one is still queued, the
+  stale frame is dropped (recycled), so end-to-end latency stays bounded under load
+  instead of building a send backlog — mirrors the host's latest-wins `FrameReceiver`.
+- **Zero per-frame allocation.** Eye pixel buffers come from a fixed 3-slot pool, so the
+  hot path eliminates the ~40 MB/frame of `new byte[]` churn (and the GC pauses it caused
+  at 72–90 Hz). Pixels are mapped straight out of the PBO into the pooled buffer.
+- **Lifecycle.** `AppleVisionProvider.destroy()` closes the submitter (joins the sender
+  thread); the renderer's `destroyBuffers()` frees the PBOs on the render thread.
+- Covered by `AsyncFrameSenderTest` (in-order delivery, backpressure dropping, buffer
+  pooling/resize, commit-after-close safety); full bridge suite green; mod `:common`
+  compiles.
+
+## Async PBO readback + device-true render resolution
+
+Two follow-ups landed (still no on-device test; both are code-grounded and verified by
+compile/tests):
+
+- **(a) Device-recommended render size.** `AppleVisionStereoRenderer` now sizes the eye
+  buffers to the host's `view_config` recommended dimensions (1:1 sampling on the headset)
+  instead of the fixed `1512×1680`. Dims are clamped to `[512, 4096]`. Adoption is a single
+  stable reinit: `endFrame()` detects the change once `view_config` arrives, sets
+  `resolution` + `reinitFrameBuffers`, and the next frame rebuilds the FB stack at the new
+  size. The host's `FrameReceiver` already resets its texture pool on a dimension change,
+  so the switch is safe mid-session.
+- **(b) Async double-buffered PBO readback.** `AppleFrameSubmitter` replaced the synchronous
+  `glGetTexImage`-to-client-memory copy (which stalls the GL pipeline until the GPU
+  finishes) with a ping-pong of pixel-pack buffers: each frame issues a non-blocking
+  `glGetTexImage` into the current PBO and maps the *previous* PBO (whose DMA already
+  completed) read-only, copying it into the pooled send buffer. Net effect: the render
+  thread no longer stalls on GPU→CPU transfer, at the cost of one frame of transport
+  latency (the host reprojects against its own latest pose regardless). The transferred
+  bytes are identical to before, so there's no pixel/orientation change. GL state
+  (`GL_TEXTURE_BINDING_2D`, `GL_PIXEL_PACK_BUFFER_BINDING`) is saved/restored each call;
+  PBOs are recreated lazily on size change and freed in `destroyBuffers()`.
+
+True cross-process **IOSurface zero-copy** is still future work: it needs a JNI native lib
+(none is wired today — `bridge/native/MetalInterop.mm` is an unbuilt stub) plus mach-port
+IPC to share the surface across the Minecraft and host processes (a mach port can't cross
+the TCP bridge). The PBO path removes the readback stall without that risk.
+
+## Hand / pinch input (wire contract only — host source blocked on macOS)
+
+A `hand` bridge message (chirality, `tracked`, `pinch` 0..1, advisory wrist pose) and its full
+**Java consumer** are implemented and tested: `AppleNativeBridge` parses it into `HandState`, and
+`AppleVisionProvider.processInputs()` maps **right pinch → primary (attack/mine, GUI click)** and
+**left pinch → secondary (use/place)** with engage/release **hysteresis** (0.7/0.4) and edge-
+triggered `InputSimulator` mouse press/release. Held buttons are force-released on disconnect and
+on `destroy()` so input can never stick.
+
+**Critical platform finding (compiler- and docs-grounded):** ARKit `HandTrackingProvider` is a
+local on-device visionOS feature and is **`unavailable` on macOS**. The macOS Spatial Rendering /
+RemoteImmersiveSpace host only vends head pose (`WorldTrackingProvider`), so it **cannot emit
+`hand`**. The host code was therefore kept head-tracking-only. The `hand` contract is exercised
+end-to-end by `MockVisionCraftHost` (→ `BridgeIntegrationTest.clientReceivesHandPinch`) and is the
+drop-in integration point for a **future visionOS-native helper** that runs hand tracking on-device
+and streams pinch over the bridge. Until such a source exists, hands stay untracked and contribute
+no input — the playable path today is **head aim + Mac keyboard/mouse**.
+
 ## Known gaps
 
 1. M0 10-minute stability was intentionally deferred to avoid headset wear; debug as needed during playable testing.
 2. Pose uses `WorldTrackingProvider` when a remote Vision Pro device identifier is available; otherwise it falls back to simulated pose for bridge preflight.
-3. Frame path uses **CPU readback** (slow; M6 IOSurface)
+3. Frame path still uses **CPU readback over TCP**, but the synchronous GPU stall, the
+   allocation churn, and the render-thread network stall are all resolved (async PBO +
+   off-thread pooled sender). The remaining architectural step is true cross-process
+   IOSurface zero-copy (needs JNI + mach-port IPC — see section above).
 4. OpenVR JAR may still load with LWJGL; Apple path does not call `MCOpenVR`
-5. Eye render buffers are fixed at `1512×1680`; not yet resized to the host's
-   recommended `view_config` dimensions (sampling-quality only — geometry is correct).
-6. No real controller/hand input, haptics, or spatial audio on the Apple path yet.
+5. **Pinch input is fully wired on the client but inert in production**: no on-device hand source
+   exists because `HandTrackingProvider` is macOS-unavailable (see "Hand / pinch input" above). A
+   visionOS-native hand-streaming helper is the next real-input step. No haptics or spatial audio yet.
 
 ## Coordinate tuning
 

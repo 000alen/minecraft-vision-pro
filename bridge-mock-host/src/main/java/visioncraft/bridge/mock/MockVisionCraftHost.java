@@ -93,6 +93,7 @@ public final class MockVisionCraftHost implements AutoCloseable {
         ) {
             sendJson(out, sessionJson("ready"));
             sendJson(out, VIEW_CONFIG_JSON);
+            sendJson(out, HAND_JSON);
             AtomicInteger recenterCounter = new AtomicInteger(0);
             AtomicBoolean poseRunning = new AtomicBoolean(true);
             Thread poseThread = new Thread(() -> poseLoop(out, recenterCounter, poseRunning), "mock-pose");
@@ -229,6 +230,15 @@ public final class MockVisionCraftHost implements AutoCloseable {
             "\"views\":[" +
             "{\"index\":0,\"tangents\":[1.21,0.93,1.02,1.02],\"width\":1888,\"height\":1824}," +
             "{\"index\":1,\"tangents\":[0.93,1.21,1.02,1.02],\"width\":1888,\"height\":1824}" +
+            "]}";
+
+    /** Right hand fully pinched, left hand open — exercises both the pinch and idle paths. */
+    private static final String HAND_JSON =
+        "{\"type\":\"hand\",\"version\":1,\"timestamp_ns\":1,\"hands\":[" +
+            "{\"chirality\":\"left\",\"tracked\":true,\"position_m\":[-0.2,1.3,-0.3]," +
+            "\"orientation_xyzw\":[0.0,0.0,0.0,1.0],\"pinch\":0.05}," +
+            "{\"chirality\":\"right\",\"tracked\":true,\"position_m\":[0.2,1.3,-0.3]," +
+            "\"orientation_xyzw\":[0.0,0.0,0.0,1.0],\"pinch\":0.92}" +
             "]}";
 
     public MockHostStats getStats() {
