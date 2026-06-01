@@ -205,6 +205,42 @@ drop-in integration point for a **future visionOS-native helper** that runs hand
 and streams pinch over the bridge. Until such a source exists, hands stay untracked and contribute
 no input — the playable path today is **head aim + Mac keyboard/mouse**.
 
+## visionOS companion app — Phase 1 scaffolding (code-grounded, not yet built in Xcode)
+
+The hand/pinch finding above (no on-device hand source on macOS) is being resolved the only way
+the Mac-only constraint allows: a **native visionOS companion app** that runs on the Vision Pro,
+does its own head + hand tracking, and turns the Mac into a video encoder/relay. This **flips the
+architecture** — the AVP becomes the renderer; the Mac HEVC-encodes the eye frames Minecraft
+already produces and streams them to the headset.
+
+- **Wire protocol** (`bridge/stream-protocol.md`, new): Mac ↔ AVP over LAN TCP, Bonjour-discovered
+  (`_visioncraft-stream._tcp`), length-prefixed binary envelopes. Messages: `HELLO`, `PING`/`PONG`,
+  `VIDEO_CONFIG`, `VIDEO_FRAME` (HEVC side-by-side, Annex-B), `UPLINK` (verbatim `bridge/protocol.md`
+  pose/hand/recenter JSON), `BYE`. `maxMessageLength` 64 MiB. The **loopback Java bridge is unchanged**.
+- **App** (`visionos-app/`, new, ~12 Swift files + shader + Info.plist/entitlements + README):
+  - `VisionCraftCompanionApp` + `ContentStageConfiguration`: `ImmersiveSpace` → `CompositorLayer`,
+    `.layered`, foveation off, `.full` immersion, upper limbs visible.
+  - `AppModel`: plain `@Observable` (not `@MainActor`, to match the off-main `CompositorLayer`
+    content closure that hands over a non-`Sendable` `LayerRenderer`); UI state written via an
+    explicit main-thread hop. Owns the `ARKitSession` (world + hand), client, uplink, renderer.
+  - `CompanionRenderer`: stereo render loop adapted from the macOS host — per-eye viewports +
+    vertex amplification, world-anchored device pose, **the same `DispatchSemaphore(value: 3)`
+    frames-in-flight throttle** that fixed the host OOM. Two paths: composite the decoded
+    side-by-side video, or (Phase 1) draw a loud debug stereo pattern when no video yet.
+  - `TrackingUplink` + `HandPinch`: `WorldTrackingProvider` → `pose`, `HandTrackingProvider`
+    anchor updates → `hand` (index↔thumb pinch 0..1), emitted as `bridge/protocol.md` lines at
+    ~90 Hz. This is the on-device hand source the macOS host structurally cannot provide.
+  - `StreamClient` + `StreamProtocol`: Bonjour/manual `NWConnection`, `HELLO` handshake,
+    incremental `StreamFramer`, routes `VIDEO_FRAME` to the decoder and sends `UPLINK`.
+  - `VideoStreamDecoder` (`VideoSource`): **Phase 1 placeholder** — stores `VIDEO_CONFIG`, accepts
+    frames, but `latestFrame` stays nil so the debug scene shows. Phase 2 wires
+    VideoToolbox HEVC → `CVPixelBuffer` → `MTLTexture` (`CVMetalTextureCache`).
+- **Testable on the headset alone today** (no Mac): entering the immersive space runs ARKit and
+  the debug stereo pattern, validating tracking/stage/pinch before the video spine exists.
+- **Not yet done**: the Xcode target itself (must be created on the Mac per `visionos-app/README.md`),
+  Phase 2 decoder, and the Mac-side encoder + `StreamRelayCoordinator`. Foveated Streaming is
+  deliberately excluded (it requires NVIDIA CloudXR, incompatible with Apple Silicon).
+
 ## Known gaps
 
 1. M0 10-minute stability was intentionally deferred to avoid headset wear; debug as needed during playable testing.

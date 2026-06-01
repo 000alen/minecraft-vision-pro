@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- No special entitlement is required for on-device ARKit hand/world tracking (it is gated
+	     by the Info.plist usage strings) or for LAN networking. This file exists so the Xcode
+	     target has an entitlements file to grow into (e.g. a future TLS/keychain capability).
+	     Notably absent: com.apple.developer.foveated-streaming-session — that path needs NVIDIA
+	     CloudXR and is not part of the Mac-only architecture. -->
+</dict>
+</plist>
