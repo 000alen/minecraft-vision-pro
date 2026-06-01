@@ -29,7 +29,10 @@ public final class BridgeMetrics {
 
     public void onPose(long timestampNs) {
         posesReceived.incrementAndGet();
-        lastPoseAgeNs = System.nanoTime() - timestampNs;
+        // The host stamps poses with a Unix-epoch nanosecond clock (see bridge/protocol.md).
+        // Cross-process monotonic clocks (System.nanoTime) share no common origin, so age must
+        // be measured against the same wall-clock base the host used.
+        lastPoseAgeNs = System.currentTimeMillis() * 1_000_000L - timestampNs;
     }
 
     public long getFramesSubmitted() {

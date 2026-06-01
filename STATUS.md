@@ -73,11 +73,14 @@ Three defects from the first Minecraft playtest were root-caused and fixed in co
 
 Known refinements to tune **after** confirming the loop is stable on device
 (deliberately not changed blind):
-- Eye buffers are square (`aspect = 1.0`) but the AVP eye viewports are not, so
-  the fullscreen blit stretches slightly. Fix = render Java eyes at the viewport
-  aspect (requires host → Java dimensions).
-- Game uses a fixed symmetric 100° FOV; AVP frustums are asymmetric. Fix = send
-  per-eye projection/tangents over the bridge so frames match the device frustum.
+- Eye buffers are `1512×1680` (aspect ≈ 0.9) and the Java projection already uses
+  that exact aspect (`AppleProjectionProvider.projectionForEye(..., aspect)`), so
+  there is no square-buffer stretch. The residual mismatch is that 0.9 may not equal
+  the precise AVP per-eye viewport aspect. Fix = send the device viewport dimensions
+  host → Java so the eye buffers match it exactly.
+- Game uses a fixed symmetric FOV (`nullvrFOV` or 100° default); AVP frustums are
+  asymmetric. Fix = send per-eye projection/tangents over the bridge so frames match
+  the device frustum.
 
 ## Known gaps
 

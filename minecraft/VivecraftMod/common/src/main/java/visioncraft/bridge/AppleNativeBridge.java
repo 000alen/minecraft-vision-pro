@@ -116,32 +116,51 @@ public final class AppleNativeBridge implements AutoCloseable {
     }
 
     private void handleLine(String json) {
-        JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
-        int version = obj.get("version").getAsInt();
+        if (json.isEmpty()) {
+            return;
+        }
+        final JsonObject obj;
+        final String type;
+        final int version;
+        try {
+            obj = JsonParser.parseString(json).getAsJsonObject();
+            if (!obj.has("version") || !obj.has("type")) {
+                return;
+            }
+            version = obj.get("version").getAsInt();
+            type = obj.get("type").getAsString();
+        } catch (RuntimeException e) {
+            // A single malformed line must never tear down the reader thread.
+            return;
+        }
         if (version != PROTOCOL_VERSION) {
             return;
         }
-        String type = obj.get("type").getAsString();
-        switch (type) {
-            case "pose" -> {
-                float[] pos = parseFloatArray(obj.getAsJsonArray("position_m"), 3);
-                float[] rot = parseFloatArray(obj.getAsJsonArray("orientation_xyzw"), 4);
-                String tracking = obj.get("tracking_state").getAsString();
-                int recenter = obj.has("recenter_counter") ? obj.get("recenter_counter").getAsInt() : 0;
-                long ts = obj.get("timestamp_ns").getAsLong();
-                latestPose = new Pose(ts, pos, rot, tracking, recenter);
-                lastPoseTimestampNs.set(ts);
-                recenterCounter.set(recenter);
-                BridgeMetrics.get().onPose(ts);
-            }
-            case "session" -> sessionState = SessionState.fromString(obj.get("state").getAsString());
-            case "recenter" -> {
-                if (obj.has("recenter_counter")) {
-                    recenterCounter.set(obj.get("recenter_counter").getAsInt());
+        try {
+            switch (type) {
+                case "pose" -> {
+                    float[] pos = parseFloatArray(obj.getAsJsonArray("position_m"), 3);
+                    float[] rot = parseFloatArray(obj.getAsJsonArray("orientation_xyzw"), 4);
+                    String tracking = obj.get("tracking_state").getAsString();
+                    int recenter = obj.has("recenter_counter") ? obj.get("recenter_counter").getAsInt() : 0;
+                    long ts = obj.get("timestamp_ns").getAsLong();
+                    latestPose = new Pose(ts, pos, rot, tracking, recenter);
+                    lastPoseTimestampNs.set(ts);
+                    recenterCounter.set(recenter);
+                    BridgeMetrics.get().onPose(ts);
                 }
+                case "session" -> sessionState = SessionState.fromString(obj.get("state").getAsString());
+                case "recenter" -> {
+                    if (obj.has("recenter_counter")) {
+                        recenterCounter.set(obj.get("recenter_counter").getAsInt());
+                    }
+                }
+                case "pong" -> { /* latency probe */ }
+                default -> { /* ignore */ }
             }
-            case "pong" -> { /* latency probe */ }
-            default -> { /* ignore */ }
+        } catch (RuntimeException e) {
+            // Field-level parse issue (missing/!numeric field on a known type):
+            // skip this message, keep the reader alive.
         }
     }
 

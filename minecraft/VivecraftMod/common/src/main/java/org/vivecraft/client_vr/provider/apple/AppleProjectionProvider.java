@@ -10,17 +10,23 @@ import org.vivecraft.client_vr.ClientDataHolderVR;
  */
 public final class AppleProjectionProvider {
     private static final float DEFAULT_FOV_DEG = 100f;
-    private static final float DEFAULT_IPD_M = 0.064f;
 
     private AppleProjectionProvider() {}
 
-    public static Matrix4f projectionForEye(int eyeIndex, float nearClip, float farClip) {
+    /**
+     * Per-eye projection. This is a pure view frustum — the inter-pupillary eye
+     * separation is applied by {@link AppleVisionProvider} via the eye-to-head
+     * matrices ({@code hmdPoseLeftEye/RightEye}), exactly like the OpenVR and NullVR
+     * backends. Baking an IPD translate in here as well would double-apply parallax.
+     *
+     * @param aspect width / height of the eye render target. Must match the eye
+     *               framebuffer or the image is horizontally stretched/squished.
+     */
+    public static Matrix4f projectionForEye(int eyeIndex, float nearClip, float farClip, float aspect) {
         float fovRad = Mth.DEG_TO_RAD * eyeFovDegrees();
-        float ipd = eyeIpdMeters();
-        float offset = (eyeIndex == 0 ? -0.5f : 0.5f) * ipd;
-        float aspect = 1.0f; // square eye buffers in MVP
-        return new Matrix4f().setPerspective(fovRad, aspect, nearClip, farClip, RenderSystem.getDevice().isZZeroToOne())
-            .translate(offset, 0f, 0f);
+        float safeAspect = aspect > 0f ? aspect : 1.0f;
+        return new Matrix4f().setPerspective(
+            fovRad, safeAspect, nearClip, farClip, RenderSystem.getDevice().isZZeroToOne());
     }
 
     private static float eyeFovDegrees() {
@@ -29,13 +35,5 @@ public final class AppleProjectionProvider {
             return dh.vrSettings.nullvrFOV > 0 ? dh.vrSettings.nullvrFOV : DEFAULT_FOV_DEG;
         }
         return DEFAULT_FOV_DEG;
-    }
-
-    private static float eyeIpdMeters() {
-        ClientDataHolderVR dh = ClientDataHolderVR.getInstance();
-        if (dh != null && dh.vrSettings != null) {
-            return dh.vrSettings.nullvrIPD > 0 ? dh.vrSettings.nullvrIPD : DEFAULT_IPD_M;
-        }
-        return DEFAULT_IPD_M;
     }
 }

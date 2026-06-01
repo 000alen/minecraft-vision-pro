@@ -36,15 +36,18 @@ public final class ApplePoseProvider {
         lastRecenterCounter = pose.recenterCounter();
     }
 
-    public void applyToHmd(Matrix4f hmdPose, Matrix4f hmdRotation, float ipd) {
+    /**
+     * Writes the head pose (world position + orientation) into Vivecraft's HMD
+     * matrices. Per-eye IPD is intentionally NOT applied here — it lives in
+     * {@code hmdPoseLeftEye/RightEye}, which {@code MCVR.getEyePosition} composes
+     * as {@code hmdPose * hmdPoseEye}.
+     */
+    public void applyToHmd(Matrix4f hmdPose, Matrix4f hmdRotation) {
         hmdPose.identity();
         hmdPose.rotate(orientation);
         hmdPose.setTranslation(position);
 
         hmdRotation.set(orientation);
-
-        // eye offsets along local X
-        // left/right applied by AppleVisionProvider on hmdPoseLeftEye / RightEye
     }
 
     public float getYawRadians() {

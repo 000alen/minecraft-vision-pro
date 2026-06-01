@@ -92,6 +92,12 @@ public class AppleVisionProvider extends MCVR {
         return true;
     }
 
+    /**
+     * Eye-to-head offset matrices. {@link MCVR#getEyePosition} composes these as
+     * {@code hmdPose * hmdPoseLeftEye}, so each must be the constant per-eye offset
+     * relative to the head (a pure ±IPD/2 translation along local X) — NOT the head
+     * pose pre-multiplied in. This mirrors the OpenVR backend's eye-to-head matrices.
+     */
     private void applyEyeOffsets() {
         float ipd = getIPD();
         this.hmdPoseLeftEye.identity().m30(-ipd * 0.5F);
@@ -114,8 +120,8 @@ public class AppleVisionProvider extends MCVR {
         sessionState.updateFromBridge(bridge);
         Profiler.get().push("applePose");
         poseProvider.poll();
-        poseProvider.applyToHmd(hmdPose, hmdRotation, getIPD());
-        applyEyeOffsetsFromHead();
+        poseProvider.applyToHmd(hmdPose, hmdRotation);
+        applyEyeOffsets();
         if (poseProvider.consumeRecenterEvent()) {
             this.seatedRot = 0f;
             VRSettings.LOGGER.info("Vivecraft: Apple Vision recenter applied");
@@ -133,12 +139,6 @@ public class AppleVisionProvider extends MCVR {
         Profiler.get().popPush("hmdSampling");
         this.hmdSampling();
         Profiler.get().pop();
-    }
-
-    private void applyEyeOffsetsFromHead() {
-        float ipd = getIPD();
-        this.hmdPoseLeftEye.set(this.hmdPose).translate(-ipd * 0.5F, 0f, 0f);
-        this.hmdPoseRightEye.set(this.hmdPose).translate(ipd * 0.5F, 0f, 0f);
     }
 
     /** Head-forward ray for crosshair / block interaction without motion controllers. */

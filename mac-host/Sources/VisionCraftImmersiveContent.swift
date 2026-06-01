@@ -64,9 +64,20 @@ private struct VisionCraftCompositorConfiguration: CompositorLayerConfiguration 
         capabilities: LayerRenderer.Capabilities,
         configuration: inout LayerRenderer.Configuration
     ) {
-        // M0 validation uses full immersion with a direct layered drawable clear.
+        // `.layered` is REQUIRED by the renderer: it draws both eyes in one pass via
+        // vertex amplification into a single array-backed color texture with
+        // `renderTargetArrayLength == views.count`. Changing this to `.dedicated`
+        // or `.shared` would break the amplification path in CompositorRenderer.
         configuration.layout = .layered
         configuration.drawableRenderContextRasterSampleCount = 1
+
+        // Foveation is intentionally LEFT OFF. The M1 path presents Minecraft's
+        // uniform-resolution eye frames as a 1:1 fullscreen blit; a foveated
+        // rasterization-rate map would warp that uniform image. Re-enable only when
+        // the renderer draws foveation-aware content natively.
+        if capabilities.supportsFoveation {
+            configuration.isFoveationEnabled = false
+        }
     }
 }
 #endif

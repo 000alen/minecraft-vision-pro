@@ -10,7 +10,10 @@
 
 ## Pipeline stages
 
-Log every stage with monotonic `timestamp_ns`:
+Log every stage with monotonic `timestamp_ns` (e.g. `System.nanoTime` / `mach_absolute_time`).
+These are for **intra-process** stage deltas only. Any timestamp compared **across** the
+Java↔native boundary (e.g. `pose.timestamp_ns`) must use the Unix-epoch clock — see
+`bridge/protocol.md` § Clocks and timestamps.
 
 ```text
 t_pose_received     — Java got pose from bridge
@@ -28,7 +31,7 @@ t_present           — Compositor submit
 | Stage | Order of magnitude |
 |-------|-------------------|
 | Minecraft render (both eyes) | 8–20 ms @ 1080p scale |
-| glReadPixels × 2 | 4–12 ms |
+| glGetTexImage × 2 | 4–12 ms |
 | Socket copy | 1–4 ms |
 | Metal upload + present | 2–6 ms |
 

@@ -3,8 +3,8 @@
 ## MVP path (implemented)
 
 ```text
-OpenGL eye FBO
-  → glReadPixels (RGBA8)
+OpenGL eye texture
+  → glGetTexImage (RGBA8, GL_UNSIGNED_BYTE)
   → byte[] per eye
   → length-prefixed TCP messages
   → VisionCraftHost FrameReceiver
@@ -25,7 +25,7 @@ See [bridge/protocol.md](../bridge/protocol.md).
 ## Phase 2 — PBO async readback
 
 ```text
-glReadPixels into PBO (non-blocking)
+glGetTexImage into PBO (non-blocking)
   → map when ready
   → shared memory ring buffer
 ```

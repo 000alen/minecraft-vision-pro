@@ -43,7 +43,8 @@ public class AppleVisionStereoRenderer extends VRRenderer {
 
     @Override
     protected Matrix4f getProjectionMatrix(int eyeType, float nearClip, float farClip) {
-        return AppleProjectionProvider.projectionForEye(eyeType, nearClip, farClip);
+        float aspect = eyeHeight > 0 ? (float) eyeWidth / (float) eyeHeight : 1.0f;
+        return AppleProjectionProvider.projectionForEye(eyeType, nearClip, farClip, aspect);
     }
 
     @Override

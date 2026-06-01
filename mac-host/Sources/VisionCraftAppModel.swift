@@ -13,7 +13,6 @@ final class VisionCraftAppModel {
     var diagnosticText: String = "Idle"
     var autoStartBridge = true
     var autoOpenImmersive = false
-    var immersiveOpenRequestId = 0
     var supportsRemoteScenes = false
     var remoteDeviceIdentifierAvailable = false
     var arTrackingState = "unavailable"
@@ -127,7 +126,6 @@ final class VisionCraftAppModel {
             stopBridge()
             return .json(statusJson())
         case ("POST", "/immersive/open"):
-            immersiveOpenRequestId += 1
             diagnosticText = "Control API requested immersive open"
             NotificationCenter.default.post(name: .visionCraftOpenImmersiveRequest, object: nil)
             return .json(status: 202, #"{"requested":true}"#)

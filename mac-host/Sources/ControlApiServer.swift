@@ -31,11 +31,15 @@ final class ControlApiServer {
             return
         }
 
+        guard let portValue = UInt16(exactly: port), portValue > 0 else {
+            throw BridgeServerError.invalidPort(port)
+        }
+
         self.handler = handler
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
 
-        let listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: UInt16(port)))
+        let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: portValue)!)
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -50,6 +54,12 @@ final class ControlApiServer {
     }
 
     private func accept(_ connection: NWConnection) {
+        // Loopback-only: this control surface can start/stop the bridge and open the
+        // immersive space, so it must never be reachable from off-box.
+        guard JavaBridgeServer.isLoopback(connection.endpoint) else {
+            connection.cancel()
+            return
+        }
         connection.start(queue: queue)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, _ in
             guard let self else {

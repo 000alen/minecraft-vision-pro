@@ -1,7 +1,21 @@
 import Foundation
 import Network
 
+enum BridgeServerError: Error, CustomStringConvertible {
+    case invalidPort(Int)
+
+    var description: String {
+        switch self {
+        case .invalidPort(let port): "Invalid TCP port \(port) (expected 1...65535)"
+        }
+    }
+}
+
 /// TCP server implementing bridge/protocol.md v1.
+///
+/// Threading: all access to `connections` and `currentSession` is confined to
+/// `queue`. The listener and per-connection close callbacks marshal onto it, so
+/// there is no cross-thread mutation of the connection table.
 final class JavaBridgeServer {
     weak var appModel: VisionCraftAppModel?
     weak var compositor: CompositorRenderer?
@@ -13,8 +27,12 @@ final class JavaBridgeServer {
     private var currentSession: BridgeSessionState = .closed
 
     func start(port: Int) throws {
+        guard let portValue = UInt16(exactly: port), portValue > 0 else {
+            throw BridgeServerError.invalidPort(port)
+        }
         let params = NWParameters.tcp
-        listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: UInt16(port)))
+        params.allowLocalEndpointReuse = true
+        listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: portValue)!)
         listener?.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -30,14 +48,20 @@ final class JavaBridgeServer {
         listener = nil
         posePublisher?.stop()
         posePublisher?.detach()
-        connections.values.forEach { $0.close() }
-        connections.removeAll()
+        queue.async {
+            self.connections.values.forEach { $0.close() }
+            self.connections.removeAll()
+            self.currentSession = .closed
+        }
     }
 
     func broadcastSession(_ state: BridgeSessionState) {
-        currentSession = state
         let json = "{\"type\":\"session\",\"version\":1,\"state\":\"\(state.rawValue)\"}\n"
-        broadcast(json)
+        let data = Data(json.utf8)
+        queue.async {
+            self.currentSession = state
+            self.connections.values.forEach { $0.send(data) }
+        }
     }
 
     private func broadcast(_ line: String) {
@@ -48,6 +72,12 @@ final class JavaBridgeServer {
     }
 
     private func accept(_ connection: NWConnection) {
+        // Loopback-only: the bridge is a localhost IPC channel. Reject any peer
+        // that is not 127.0.0.0/8 or ::1 so the server is never reachable off-box.
+        guard Self.isLoopback(connection.endpoint) else {
+            connection.cancel()
+            return
+        }
         let bridge = BridgeConnection(connection: connection)
         bridge.onFrame = { [weak self] left, right, w, h, frameId in
             Task { @MainActor in
@@ -62,11 +92,28 @@ final class JavaBridgeServer {
         let id = ObjectIdentifier(connection)
         connections[id] = bridge
         bridge.onClose = { [weak self] in
-            self?.connections.removeValue(forKey: id)
+            guard let self else { return }
+            self.queue.async { self.connections.removeValue(forKey: id) }
         }
         bridge.start()
         if currentSession != .closed {
             bridge.send("{\"type\":\"session\",\"version\":1,\"state\":\"\(currentSession.rawValue)\"}\n")
+        }
+    }
+
+    /// True if a Network endpoint is an IPv4 (127.0.0.0/8) or IPv6 (::1) loopback
+    /// address, or the literal "localhost". Used to keep the TCP servers local-only.
+    static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        guard case let .hostPort(host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address):
+            return address == .loopback || "\(address)".hasPrefix("127.")
+        case .ipv6(let address):
+            return address == .loopback || "\(address)" == "::1"
+        case .name(let name, _):
+            return name == "localhost" || name.hasSuffix(".localhost")
+        @unknown default:
+            return false
         }
     }
 
@@ -168,8 +215,17 @@ private final class BridgeConnection {
               let right = meta["right"] as? [String: Any],
               let lw = left["width"] as? Int,
               let lh = left["height"] as? Int,
+              let rw = right["width"] as? Int,
+              let rh = right["height"] as? Int,
               let leftLen = left["byte_length"] as? Int,
-              let rightLen = right["byte_length"] as? Int else { return false }
+              let rightLen = right["byte_length"] as? Int,
+              lw > 0, lh > 0, rw > 0, rh > 0,
+              leftLen >= 0, rightLen >= 0 else {
+            // Unparseable metadata: we cannot know the payload size, so the stream is
+            // unrecoverable. Drop the connection rather than desync silently.
+            close()
+            return false
+        }
 
         let frameId: UInt64
         if let n = meta["frame_id"] as? NSNumber {
@@ -177,6 +233,7 @@ private final class BridgeConnection {
         } else if let n = meta["frame_id"] as? UInt64 {
             frameId = n
         } else {
+            close()
             return false
         }
 
@@ -187,7 +244,12 @@ private final class BridgeConnection {
         let rightData = buffer.dropFirst(leftLen).prefix(rightLen)
         buffer.removeFirst(total)
 
-        onFrame?(Data(leftData), Data(rightData), lw, lh, frameId)
+        // Frame the payload using byte_length (authoritative for the wire), but only
+        // hand a frame to the renderer when the declared bytes actually match the
+        // RGBA8 dimensions. A mismatch is dropped (per protocol.md) without desyncing.
+        if leftLen == lw * lh * 4 && rightLen == rw * rh * 4 && lw == rw && lh == rh {
+            onFrame?(Data(leftData), Data(rightData), lw, lh, frameId)
+        }
         return true
     }
 }

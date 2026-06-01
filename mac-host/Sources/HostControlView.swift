@@ -58,9 +58,6 @@ struct HostControlView: View {
                 await openImmersive()
             }
         }
-        .onChange(of: appModel.immersiveOpenRequestId) { _, _ in
-            Task { await openImmersive() }
-        }
         .onReceive(NotificationCenter.default.publisher(for: .visionCraftOpenImmersiveRequest)) { _ in
             Task { await openImmersive() }
         }
@@ -70,6 +67,7 @@ struct HostControlView: View {
     }
 
     private func openImmersive() async {
+        guard !appModel.immersiveSpaceOpen else { return }
         #if canImport(CompositorServices)
         if #available(macOS 26.0, *) {
             guard supportsRemoteScenes else {

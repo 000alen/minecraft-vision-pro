@@ -24,8 +24,14 @@ Metadata line, then binary:
 
 Immediately after the newline:
 
-1. `left.byte_length` bytes — RGBA8 row-major, top-left origin
+1. `left.byte_length` bytes — RGBA8 row-major, **bottom-left origin** (OpenGL convention)
 2. `right.byte_length` bytes — same format
+
+> Origin note: the Java sender produces these bytes with `glGetTexImage`, which returns
+> texture row 0 = the **bottom** scanline of the rendered eye (OpenGL's bottom-left origin).
+> The native host uploads rows verbatim into a Metal texture (top-left origin) and flips
+> vertically at sample time in the fullscreen presentation shader (`fullscreen_vertex` maps
+> NDC-top → `v = 1.0`). Do not add a CPU-side flip in Java; it would invert the image.
 
 `buffer_id` in the spec is optional in v1; use `frame_id` for correlation.
 
@@ -70,6 +76,19 @@ Response:
 ```json
 {"type":"recenter","version":1,"recenter_counter":5}
 ```
+
+## Clocks and timestamps
+
+There is no shared monotonic clock across the two processes, so each timestamp field
+has an explicit clock base:
+
+- **`pose.timestamp_ns`** — host wall clock, **Unix-epoch nanoseconds**. A Java consumer
+  measuring pose staleness must compare against its own epoch clock
+  (`System.currentTimeMillis() * 1_000_000`), never `System.nanoTime()`.
+- **`ping`/`pong.timestamp_ns`** — opaque echo token chosen by the *originator*. The
+  responder copies it back verbatim; only the originator interprets it (for RTT).
+- **`frame.timestamp_ns`** — capture time on the Java sender's clock. The native side
+  treats it as an opaque correlation id and does not compare it to its own clock.
 
 ## Connection lifecycle
 
