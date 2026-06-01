@@ -18,12 +18,27 @@ struct HostControlView: View {
             LabeledContent("Session", value: appModel.sessionState.rawValue)
             LabeledContent("Remote scenes", value: appModel.supportsRemoteScenes ? "supported" : "unsupported")
             LabeledContent("AR tracking", value: appModel.arTrackingState)
-            LabeledContent("Frames", value: "\(appModel.framesReceived)")
+            LabeledContent("Frames received", value: "\(appModel.framesReceived)")
             LabeledContent("Last frame ID", value: "\(appModel.lastFrameId)")
+
+            Divider()
+
+            Text("Companion (Apple Vision Pro)")
+                .font(.headline)
+            LabeledContent("Relay", value: appModel.relayRunning ? "listening :\(appModel.relayPort)" : "stopped")
+            LabeledContent("Companion", value: appModel.relayViewerConnected ? "connected" : "waiting")
+            LabeledContent("Frames encoded", value: "\(appModel.framesEncoded)")
 
             HStack {
                 Button("Start bridge") { appModel.startBridge() }
                 Button("Stop bridge") { appModel.stopBridge() }
+            }
+
+            HStack {
+                Button("Start relay") { appModel.startRelay() }
+                    .disabled(appModel.relayRunning)
+                Button("Stop relay") { appModel.stopRelay() }
+                    .disabled(!appModel.relayRunning)
             }
 
             HStack {
@@ -49,6 +64,12 @@ struct HostControlView: View {
             if appModel.autoStartBridge {
                 appModel.startBridge()
             }
+            if appModel.autoStartRelay {
+                appModel.startRelay()
+            }
+        }
+        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
+            appModel.refreshRelayStats()
         }
         .task {
             guard !didRunStartupAutomation else { return }

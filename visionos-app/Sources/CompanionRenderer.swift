@@ -25,6 +25,14 @@ final class CompanionRenderer {
     private weak var videoSource: VideoSource?
     private let onFrameDecoded: (UInt64) -> Void
 
+    /// Emits a `bridge/protocol.md` `view_config` line (newline-terminated) whenever the device's
+    /// per-eye frustum/IPD changes, plus a ~1 Hz heartbeat so a late-joining Java client still
+    /// receives it. The owner routes this to the stream uplink. Unlike the macOS host, these
+    /// tangents come from the *real device* drawable, so Minecraft renders the exact AVP frustum.
+    var onViewConfig: ((String) -> Void)?
+    private var lastViewConfig: String?
+    private var viewConfigHeartbeat = 0
+
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private var debugPipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
@@ -100,6 +108,11 @@ final class CompanionRenderer {
         drawable.deviceAnchor = anchor
         let headTransform = anchor?.originFromAnchorTransform ?? matrix_identity_float4x4
 
+        // Publish the device's true per-eye frustum + IPD to Java (via the uplink) so Minecraft
+        // renders the matching asymmetric projection. Cheap: only serialized/sent on change or the
+        // ~1 Hz heartbeat.
+        publishViewConfigIfNeeded(drawable: drawable)
+
         if let decoded = videoSource?.latestFrame {
             compositeVideo(decoded, into: drawable, commandBuffer: commandBuffer)
             onFrameDecoded(decoded.frameID)
@@ -119,6 +132,74 @@ final class CompanionRenderer {
         commandBuffer.commit()
         frame.endSubmission()
         presentedFrameCount &+= 1
+    }
+
+    // MARK: - view_config
+
+    private func publishViewConfigIfNeeded(drawable: LayerRenderer.Drawable) {
+        let views = drawable.views
+        guard !views.isEmpty else { return }
+
+        var eyeFragments: [String] = []
+        eyeFragments.reserveCapacity(views.count)
+        for index in views.indices {
+            let projection = drawable.computeProjection(viewIndex: index)
+            let tangents = Self.tangents(fromProjection: projection)
+            let viewport = views[index].textureMap.viewport
+            eyeFragments.append(
+                "{\"index\":\(index),\"tangents\":[\(Self.fmt(tangents.x)),\(Self.fmt(tangents.y)),\(Self.fmt(tangents.z)),\(Self.fmt(tangents.w))],\"width\":\(Int(viewport.width)),\"height\":\(Int(viewport.height))}"
+            )
+        }
+
+        // IPD = distance between the two eye origins (eye-to-device translations).
+        var ipd: Float = 0
+        if views.count >= 2 {
+            let a = views[0].transform.columns.3
+            let b = views[1].transform.columns.3
+            ipd = simd_distance(SIMD3<Float>(a.x, a.y, a.z), SIMD3<Float>(b.x, b.y, b.z))
+        }
+
+        let json = "{\"type\":\"view_config\",\"version\":1,\"ipd_m\":\(Self.fmt(ipd)),\"views\":[\(eyeFragments.joined(separator: ","))]}\n"
+
+        viewConfigHeartbeat += 1
+        let changed = json != lastViewConfig
+        // ~1 Hz heartbeat at 90 fps so a Java client connecting mid-session still receives it.
+        guard changed || viewConfigHeartbeat >= 90 else { return }
+        viewConfigHeartbeat = 0
+        lastViewConfig = json
+        onViewConfig?(json)
+    }
+
+    /// Recover the positive frustum tangents `[left, right, up, down]` from a Compositor Services
+    /// projection matrix — same convention-agnostic method as the macOS host, so both ends agree.
+    /// For any perspective projection, the inverse maps an NDC edge point to a view-space ray whose
+    /// lateral/forward ratio is that edge's tangent; magnitudes make it robust to handedness /
+    /// reverse-Z.
+    private static func tangents(fromProjection projection: simd_float4x4) -> SIMD4<Float> {
+        let inverse = projection.inverse
+        func edgeDirection(_ ndcX: Float, _ ndcY: Float) -> SIMD3<Float> {
+            let view = inverse * SIMD4<Float>(ndcX, ndcY, 0.5, 1)
+            let w = abs(view.w) > 1e-7 ? view.w : 1
+            return SIMD3<Float>(view.x, view.y, view.z) / w
+        }
+        func tangent(_ lateral: Float, _ forward: Float) -> Float {
+            let denom = max(abs(forward), 1e-6)
+            return min(max(abs(lateral) / denom, 0.05), 10.0)
+        }
+        let left = edgeDirection(-1, 0)
+        let right = edgeDirection(1, 0)
+        let up = edgeDirection(0, 1)
+        let down = edgeDirection(0, -1)
+        return SIMD4<Float>(
+            tangent(left.x, left.z),
+            tangent(right.x, right.z),
+            tangent(up.y, up.z),
+            tangent(down.y, down.z)
+        )
+    }
+
+    private static func fmt(_ value: Float) -> String {
+        String(format: "%.6g", value)
     }
 
     private func deviceAnchor(presentationTime: LayerRenderer.Frame.Timing) -> DeviceAnchor? {

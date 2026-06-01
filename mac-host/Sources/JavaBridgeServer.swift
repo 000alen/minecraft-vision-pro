@@ -20,6 +20,7 @@ final class JavaBridgeServer {
     weak var appModel: VisionCraftAppModel?
     weak var compositor: CompositorRenderer?
     weak var posePublisher: PosePublisher?
+    weak var relay: StreamRelayCoordinator?
 
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: BridgeConnection] = [:]
@@ -64,6 +65,13 @@ final class JavaBridgeServer {
         }
     }
 
+    /// Forward a verbatim `bridge/protocol.md` line received over the companion uplink (pose /
+    /// hand / view_config / recenter) to all connected Java clients. The companion is the
+    /// authoritative source for these while it is connected.
+    func forwardUplink(_ line: String) {
+        broadcast(line)
+    }
+
     private func broadcast(_ line: String) {
         let data = Data(line.utf8)
         queue.async {
@@ -84,7 +92,10 @@ final class JavaBridgeServer {
                 self?.appModel?.lastFrameId = frameId
                 self?.appModel?.framesReceived += 1
             }
+            // Local immersive path (RemoteImmersiveSpace) and the companion relay path are
+            // independent sinks for the same frame; either, both, or neither may be active.
             self?.compositor?.uploadFrame(left: left, right: right, width: w, height: h)
+            self?.relay?.submitFrame(left: left, right: right, width: w, height: h, frameId: frameId)
         }
         bridge.onLine = { [weak self] line in
             self?.handleClientLine(line, bridge: bridge)

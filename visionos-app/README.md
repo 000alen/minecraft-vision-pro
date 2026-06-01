@@ -28,11 +28,21 @@ See `../bridge/stream-protocol.md` for the wire format.
 
 ## Status (phased)
 
-- **Phase 1 (in this commit):** app + immersive stage + on-device head/hand tracking + uplink +
-  stream client framing. The renderer shows a debug stereo pattern until video arrives, so this is
-  **testable on the headset alone** (no Mac needed) to validate tracking, pinch, and the stage.
-- **Phase 2 (next):** `VideoStreamDecoder` (VideoToolbox HEVC → `MTLTexture`) and the Mac relay
-  encoder. Until then `latestFrame` is nil and the debug scene shows.
+- **Phase 1 (done):** app + immersive stage + on-device head/hand tracking + uplink + stream client
+  framing. The renderer shows a debug stereo pattern until video arrives, so this is **testable on
+  the headset alone** (no Mac needed) to validate tracking, pinch, and the stage.
+- **Phase 2 (done):** end-to-end video + frustum.
+  - **Mac relay** (`mac-host/`): `StereoFrameEncoder` (vImage RGBA→BGRA pack + VideoToolbox HEVC →
+    Annex-B) → `StreamRelayServer` (Bonjour `_visioncraft-stream._tcp`, single viewer) wired through
+    `StreamRelayCoordinator`. The companion's uplink is forwarded into the loopback bridge and the
+    host's local pose emitter is suppressed while the headset is connected.
+  - **Companion**: `VideoStreamDecoder` rebuilds a `CMVideoFormatDescription` from each keyframe's
+    inline VPS/SPS/PPS, feeds VCL NALs to a low-latency `VTDecompressionSession`, and wraps the
+    output `CVPixelBuffer` as an `MTLTexture` via `CVMetalTextureCache` (latest-frame-wins, current
+    + previous frame retained for in-flight GPU reads). `CompanionRenderer` also emits the device's
+    true per-eye `view_config` (tangents + IPD) over the uplink, so Minecraft renders the exact AVP
+    frustum.
+- **Remaining:** on-device bring-up (decode latency/color/orientation verification on the headset).
 
 ## Files
 
@@ -46,7 +56,7 @@ See `../bridge/stream-protocol.md` for the wire format.
 | `Sources/HandPinch.swift` | Index↔thumb pinch strength |
 | `Sources/StreamClient.swift` | Bonjour discovery + `stream-protocol` client |
 | `Sources/StreamProtocol.swift` | Envelope framing |
-| `Sources/VideoStreamDecoder.swift` | HEVC decode (Phase 2) |
+| `Sources/VideoStreamDecoder.swift` | HEVC decode → `MTLTexture` (VideoToolbox + `CVMetalTextureCache`) |
 | `Sources/VideoSource.swift` | `VideoSource` protocol + `DecodedFrame` |
 | `Shaders/Composite.metal` | Debug pattern + per-eye video sampling |
 | `Resources/Info.plist` | Usage strings + Bonjour service |

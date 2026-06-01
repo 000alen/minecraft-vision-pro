@@ -93,6 +93,9 @@ final class AppModel {
                 self?.mainAsync { self?.framesDecoded = count }
             }
         )
+        // The renderer owns the real device drawable, so it's the source of the per-eye frustum +
+        // IPD. Route its `view_config` through the same uplink as pose/hand.
+        renderer.onViewConfig = { [weak client] line in client?.sendUplink(line) }
         self.renderer = renderer
 
         Task { await self.runTrackingSession(uplink: uplink) }

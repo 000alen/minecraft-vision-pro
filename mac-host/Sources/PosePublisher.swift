@@ -20,6 +20,17 @@ final class PosePublisher {
     private var latestPose: PoseSample?
     private let lock = NSLock()
 
+    /// When the companion (Apple Vision Pro) is connected it uplinks the authoritative on-device
+    /// head pose, so the host stops emitting its own pose to avoid two sources fighting. Guarded by
+    /// `lock` because it is toggled from the relay callback and read on the timer thread.
+    private var suppressLocalPose = false
+
+    func setSuppressLocalPose(_ suppress: Bool) {
+        lock.lock()
+        suppressLocalPose = suppress
+        lock.unlock()
+    }
+
     func attach(broadcast: @escaping (String) -> Void) {
         sendToAll = broadcast
         if timer == nil {
@@ -84,6 +95,12 @@ final class PosePublisher {
     #endif
 
     func tick() {
+        lock.lock()
+        let suppress = suppressLocalPose
+        lock.unlock()
+        // The companion is the pose source; forwarding its uplink is handled by the relay.
+        if suppress { return }
+
         let pose = currentPose()
         let ts = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
         let json = """

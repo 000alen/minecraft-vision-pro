@@ -10,17 +10,24 @@ final class VisionCraftAppModel {
     var framesReceived: UInt64 = 0
     var bridgePort: Int = 19735
     var controlPort: Int = 19734
+    var relayPort: Int = 19736
+    var relayToken: String = ""
     var diagnosticText: String = "Idle"
     var autoStartBridge = true
+    var autoStartRelay = true
     var autoOpenImmersive = false
     var supportsRemoteScenes = false
     var remoteDeviceIdentifierAvailable = false
     var arTrackingState = "unavailable"
+    var relayRunning = false
+    var relayViewerConnected = false
+    var framesEncoded: UInt64 = 0
 
     let bridgeServer = JavaBridgeServer()
     let controlApiServer = ControlApiServer()
     let compositor = CompositorRenderer()
     let posePublisher = PosePublisher()
+    let relay: StreamRelayCoordinator
 
     init(processInfo: ProcessInfo = .processInfo) {
         let environment = processInfo.environment
@@ -40,9 +47,29 @@ final class VisionCraftAppModel {
         ) {
             controlPort = configuredControlPort
         }
+        var resolvedRelayPort = 19736 // mirrors the `relayPort` default below
+        if let configuredRelayPort = Self.intValue(
+            for: "VISIONCRAFT_RELAY_PORT",
+            arguments: arguments,
+            environment: environment
+        ) {
+            resolvedRelayPort = configuredRelayPort
+        }
+        let resolvedRelayToken = environment["VISIONCRAFT_RELAY_TOKEN"] ?? ""
+
+        // Initialize `relay` before any `self.` property reads (all stored properties must be set
+        // before `self` is usable in init).
+        relayPort = resolvedRelayPort
+        relayToken = resolvedRelayToken
+        relay = StreamRelayCoordinator(port: UInt16(clamping: resolvedRelayPort), token: resolvedRelayToken)
 
         autoStartBridge = !Self.boolValue(
             for: "VISIONCRAFT_NO_AUTO_START_BRIDGE",
+            arguments: arguments,
+            environment: environment
+        )
+        autoStartRelay = !Self.boolValue(
+            for: "VISIONCRAFT_NO_AUTO_START_RELAY",
             arguments: arguments,
             environment: environment
         )
@@ -68,6 +95,7 @@ final class VisionCraftAppModel {
         bridgeServer.appModel = self
         bridgeServer.compositor = compositor
         bridgeServer.posePublisher = posePublisher
+        bridgeServer.relay = relay
         do {
             try bridgeServer.start(port: bridgePort)
             diagnosticText = "Bridge listening on :\(bridgePort)"
@@ -82,6 +110,47 @@ final class VisionCraftAppModel {
     func stopBridge() {
         bridgeServer.stop()
         diagnosticText = "Bridge stopped"
+    }
+
+    func startRelay() {
+        // Forward the companion's on-device pose/hand/view_config straight into the loopback bridge.
+        relay.onUplinkLine = { [weak self] line in
+            self?.bridgeServer.forwardUplink(line)
+        }
+        relay.onStatus = { [weak self] status in
+            Task { @MainActor in self?.diagnosticText = status }
+        }
+        relay.onViewerChange = { [weak self] connected in
+            Task { @MainActor in
+                guard let self else { return }
+                self.relayViewerConnected = connected
+                // While the headset is the pose source, silence the host's local pose emitter.
+                self.posePublisher.setSuppressLocalPose(connected)
+                self.diagnosticText = connected ? "Companion connected" : "Companion disconnected"
+            }
+        }
+        do {
+            try relay.start()
+            relayRunning = true
+            diagnosticText = "Relay listening on :\(relayPort) (Bonjour _visioncraft-stream._tcp)"
+        } catch {
+            relayRunning = false
+            diagnosticText = "Relay failed: \(error.localizedDescription)"
+        }
+    }
+
+    func stopRelay() {
+        relay.stop()
+        relayRunning = false
+        relayViewerConnected = false
+        posePublisher.setSuppressLocalPose(false)
+        diagnosticText = "Relay stopped"
+    }
+
+    /// Pull the relay's live counters onto the main-actor observable state (called from the UI tick).
+    func refreshRelayStats() {
+        framesEncoded = relay.framesEncoded
+        relayViewerConnected = relay.viewerConnected
     }
 
     func onImmersiveSpaceOpened() {
@@ -125,6 +194,15 @@ final class VisionCraftAppModel {
         case ("POST", "/bridge/stop"):
             stopBridge()
             return .json(statusJson())
+        case ("POST", "/relay/start"):
+            if let port = request.query["port"].flatMap(Int.init) {
+                relayPort = port
+            }
+            startRelay()
+            return .json(statusJson())
+        case ("POST", "/relay/stop"):
+            stopRelay()
+            return .json(statusJson())
         case ("POST", "/immersive/open"):
             diagnosticText = "Control API requested immersive open"
             NotificationCenter.default.post(name: .visionCraftOpenImmersiveRequest, object: nil)
@@ -138,8 +216,9 @@ final class VisionCraftAppModel {
     }
 
     private func statusJson() -> String {
-        """
-        {"ok":true,"bridge_port":\(bridgePort),"control_port":\(controlPort),"supports_remote_scenes":\(supportsRemoteScenes),"remote_device_identifier_available":\(remoteDeviceIdentifierAvailable),"ar_tracking_state":"\(Self.escapeJson(arTrackingState))","immersive_open":\(immersiveSpaceOpen),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),\(compositor.statusJsonFragment()),"diagnostic":"\(Self.escapeJson(diagnosticText))"}
+        refreshRelayStats()
+        return """
+        {"ok":true,"bridge_port":\(bridgePort),"control_port":\(controlPort),"relay_port":\(relayPort),"relay_running":\(relayRunning),"relay_viewer_connected":\(relayViewerConnected),"frames_encoded":\(framesEncoded),"supports_remote_scenes":\(supportsRemoteScenes),"remote_device_identifier_available":\(remoteDeviceIdentifierAvailable),"ar_tracking_state":"\(Self.escapeJson(arTrackingState))","immersive_open":\(immersiveSpaceOpen),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),\(compositor.statusJsonFragment()),"diagnostic":"\(Self.escapeJson(diagnosticText))"}
         """
     }
 }

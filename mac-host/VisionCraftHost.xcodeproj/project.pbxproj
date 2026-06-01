@@ -18,6 +18,10 @@
 		A10000010000000000000009 /* CoordinateNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000010000000000000009 /* CoordinateNotes.swift */; };
 		A1000001000000000000000A /* Composite.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000001000000000000000A /* Composite.metal */; };
 		A1000001000000000000000B /* ControlApiServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001000000000000000B /* ControlApiServer.swift */; };
+		A1000001000000000000000C /* StreamProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001000000000000000C /* StreamProtocol.swift */; };
+		A1000001000000000000000D /* StereoFrameEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001000000000000000D /* StereoFrameEncoder.swift */; };
+		A1000001000000000000000E /* StreamRelayServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001000000000000000E /* StreamRelayServer.swift */; };
+		A1000001000000000000000F /* StreamRelayCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001000000000000000F /* StreamRelayCoordinator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +36,10 @@
 		A20000010000000000000009 /* CoordinateNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoordinateNotes.swift; sourceTree = "<group>"; };
 		A2000001000000000000000A /* Composite.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Composite.metal; sourceTree = "<group>"; };
 		A2000001000000000000000B /* ControlApiServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlApiServer.swift; sourceTree = "<group>"; };
+		A2000001000000000000000C /* StreamProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamProtocol.swift; sourceTree = "<group>"; };
+		A2000001000000000000000D /* StereoFrameEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StereoFrameEncoder.swift; sourceTree = "<group>"; };
+		A2000001000000000000000E /* StreamRelayServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamRelayServer.swift; sourceTree = "<group>"; };
+		A2000001000000000000000F /* StreamRelayCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamRelayCoordinator.swift; sourceTree = "<group>"; };
 		A30000010000000000000001 /* VisionCraftHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VisionCraftHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -58,6 +66,10 @@
 				A2000001000000000000000B /* ControlApiServer.swift */,
 				A20000010000000000000008 /* PosePublisher.swift */,
 				A20000010000000000000009 /* CoordinateNotes.swift */,
+				A2000001000000000000000C /* StreamProtocol.swift */,
+				A2000001000000000000000D /* StereoFrameEncoder.swift */,
+				A2000001000000000000000E /* StreamRelayServer.swift */,
+				A2000001000000000000000F /* StreamRelayCoordinator.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -141,6 +153,10 @@
 				A10000010000000000000008 /* PosePublisher.swift in Sources */,
 				A10000010000000000000009 /* CoordinateNotes.swift in Sources */,
 				A1000001000000000000000A /* Composite.metal in Sources */,
+				A1000001000000000000000C /* StreamProtocol.swift in Sources */,
+				A1000001000000000000000D /* StereoFrameEncoder.swift in Sources */,
+				A1000001000000000000000E /* StreamRelayServer.swift in Sources */,
+				A1000001000000000000000F /* StreamRelayCoordinator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
