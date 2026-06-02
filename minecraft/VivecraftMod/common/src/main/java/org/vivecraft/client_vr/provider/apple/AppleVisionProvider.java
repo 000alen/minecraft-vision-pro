@@ -45,7 +45,7 @@ public class AppleVisionProvider extends MCVR {
     private final AppleNativeBridge bridge = new AppleNativeBridge(BridgeSettings.host(), BridgeSettings.port());
     private final AppleSessionState sessionState = new AppleSessionState();
     private final ApplePoseProvider poseProvider;
-    private final AppleInputProvider inputProvider = new AppleInputProvider();
+    private final AppleInputProvider inputProvider = new AppleInputProvider(bridge);
     private AppleFrameSubmitter frameSubmitter;
     private boolean vrActive = true;
 
@@ -53,7 +53,7 @@ public class AppleVisionProvider extends MCVR {
         super(mc, dh, VivecraftVRMod.INSTANCE);
         instance = this;
         this.poseProvider = new ApplePoseProvider(bridge);
-        this.hapticScheduler = new AppleVisionHapticScheduler();
+        this.hapticScheduler = new AppleVisionHapticScheduler(bridge);
     }
 
     public static AppleVisionProvider get() {
@@ -165,7 +165,7 @@ public class AppleVisionProvider extends MCVR {
             }
         }
         Profiler.get().popPush("appleInput");
-        inputProvider.processInputs();
+        inputProvider.processInputs(this);
         this.processInputs();
         Profiler.get().popPush("hmdSampling");
         this.hmdSampling();
@@ -190,7 +190,11 @@ public class AppleVisionProvider extends MCVR {
     @Override
     public void processInputs() {
         this.ignorePressesNextFrame = false;
-        updateHandPinch();
+        if (inputProvider.hasSeenControllerState()) {
+            releasePinchFallbacks();
+        } else {
+            updateHandPinch();
+        }
     }
 
     /**
@@ -231,6 +235,25 @@ public class AppleVisionProvider extends MCVR {
         return wantDown;
     }
 
+    private void releasePinchFallbacks() {
+        if (rightPinchHeld) {
+            InputSimulator.releaseMouse(GLFW.GLFW_MOUSE_BUTTON_LEFT);
+            rightPinchHeld = false;
+        }
+        if (leftPinchHeld) {
+            InputSimulator.releaseMouse(GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+            leftPinchHeld = false;
+        }
+        if (rightMiddleHeld) {
+            InputSimulator.releaseKey(GLFW.GLFW_KEY_SPACE);
+            rightMiddleHeld = false;
+        }
+        if (leftMiddleHeld) {
+            InputSimulator.releaseKey(GLFW.GLFW_KEY_LEFT_SHIFT);
+            leftMiddleHeld = false;
+        }
+    }
+
     /** Edge detection with hysteresis: higher engage threshold, lower release threshold. */
     private static boolean wantPinch(boolean tracked, float strength, boolean held) {
         if (!tracked) {
@@ -254,7 +277,7 @@ public class AppleVisionProvider extends MCVR {
 
     @Override
     public String getOriginName(long origin) {
-        return "AppleVision";
+        return inputProvider.getOriginName(origin);
     }
 
     @Override
@@ -264,7 +287,12 @@ public class AppleVisionProvider extends MCVR {
 
     @Override
     public List<Long> getOrigins(VRInputAction action) {
-        return List.of();
+        return inputProvider.getOrigins(action);
+    }
+
+    @Override
+    public ControllerType getOriginControllerType(long origin) {
+        return inputProvider.getOriginControllerType(origin);
     }
 
     @Override

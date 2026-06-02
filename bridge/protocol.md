@@ -59,6 +59,21 @@ Response:
 {"type":"pong","version":1,"timestamp_ns":123}
 ```
 
+### `haptic`
+
+Best-effort controller haptics from Vivecraft to ALVRClient. The host maps `hand` to the
+left/right ALVR hand device and calls `alvr_send_haptics`; clients without haptic hardware may
+ignore it.
+
+```json
+{"type":"haptic","version":1,"hand":"right","duration_s":0.04,"frequency_hz":120.0,"amplitude":0.6}
+```
+
+- `hand` — `left` | `right`.
+- `duration_s` — pulse duration in seconds.
+- `frequency_hz` — requested haptic frequency.
+- `amplitude` — normalized `0..1`.
+
 ## Native → Java
 
 ### `pose`
@@ -110,9 +125,46 @@ Until the first `view_config` arrives, Java falls back to a symmetric FOV and it
 IPD. Receiving a `view_config` is idempotent — the client stores the latest values.
 
 On Apple Vision Pro, the Vivecraft Apple provider **withholds stereo frames** until the first
-`view_config` is received (symmetric fallback frames do not fuse on-device). The companion
-uplinks on-device `view_config`; when a companion is connected, the Mac host suppresses its own
-remote-display `view_config` so only one source is active.
+`view_config` is received (symmetric fallback frames do not fuse on-device). ALVRClient reports
+on-device view configuration through `alvr_server_core`; when ALVR is connected, the Mac host
+suppresses its fallback `view_config` so only one source is active.
+
+### `controller`
+
+Primary ALVR input channel. The Mac host publishes this from raw ALVRClient button/axis
+events plus the latest left/right device poses. It is sent at tracking cadence and
+immediately after button changes. Missing hands default to untracked/no input; Java also
+releases all controller actions if this message goes stale.
+
+```json
+{"type":"controller","version":1,"timestamp_ns":123456789,"controllers":[{"hand":"left","tracked":true,"position_m":[-0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"buttons":{"x":true,"trigger_click":false},"axes":{"thumbstick_x":0.25,"thumbstick_y":-0.5,"trigger":0.1}},{"hand":"right","tracked":true,"position_m":[0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"buttons":{"a":true,"trigger_click":true},"axes":{"thumbstick_x":0.75,"thumbstick_y":0.0,"trigger":1.0}}]}
+```
+
+- `controllers[].hand` — `left` | `right`.
+- `controllers[].tracked` — pose tracking state for the hand/controller device. Input values can
+  still be present while pose tracking is temporarily false; consumers must use staleness to
+  release stuck input.
+- `controllers[].buttons` — binary ALVRClient paths normalized to stable names, currently:
+  `a`, `b`, `x`, `y`, `trigger_click`, `trigger_touch`, `squeeze_click`, `squeeze_touch`,
+  `thumbstick_click`, `thumbstick_touch`, `menu_click`, `system_click`.
+- `controllers[].axes` — scalar ALVRClient paths normalized to stable names, currently:
+  `trigger`, `trigger_sensor`, `squeeze`, `squeeze_force`, `squeeze_sensor`,
+  `thumbstick_x`, `thumbstick_y`.
+- `position_m` / `orientation_xyzw` — advisory controller/hand pose in the same tracking space as
+  `pose`.
+
+Default Vivecraft mapping:
+
+| Input | Action |
+|---|---|
+| Left thumbstick | movement / strafe axis |
+| Right thumbstick X | turn axis |
+| Right trigger | attack / primary |
+| Left trigger | use / secondary |
+| Squeeze / grip | VR interact + climb grab |
+| Right A / B | jump / sneak |
+| Left X / Y | inventory / radial menu |
+| Menu or system click | in-game menu |
 
 ### `hand`
 
@@ -120,14 +172,9 @@ Per-hand tracking (pinch + advisory wrist pose). A host publishes this on the sa
 channel/cadence as `pose` (heartbeat at the pose rate) whenever hand tracking is supported
 and running. Hands that are not currently tracked are reported with `tracked:false`.
 
-> **Platform note.** ARKit `HandTrackingProvider` is a local, on-device visionOS feature and is
-> `unavailable` on macOS. The current **macOS Spatial Rendering / RemoteImmersiveSpace host vends
-> head pose only** (via `WorldTrackingProvider`) and therefore does **not** emit `hand`. This
-> message is the stable wire contract for hand input: it is emitted today by the mock host
-> (`MockVisionCraftHost`, for tests) and is the integration point for a future visionOS-native
-> host that runs `HandTrackingProvider` on-device and streams pinch over this bridge. The Java
-> client already consumes it (right pinch → primary, left pinch → secondary); when no host emits
-> `hand`, both hands stay untracked and contribute no input.
+> **Compatibility note.** `controller` is now the primary ALVR input message. The Mac host still
+> emits `hand` as a projection from trigger/squeeze values so older pinch consumers release and
+> continue to work during the transition.
 
 ```json
 {"type":"hand","version":1,"timestamp_ns":123456789,"hands":[{"chirality":"left","tracked":true,"position_m":[-0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.0,"pinch_middle":0.0},{"chirality":"right","tracked":true,"position_m":[0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.92,"pinch_middle":0.0}]}

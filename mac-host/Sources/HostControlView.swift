@@ -2,113 +2,154 @@ import SwiftUI
 
 struct HostControlView: View {
     @Bindable var appModel: VisionCraftAppModel
-    @Environment(\.openImmersiveSpace) private var openImmersiveSpace
-    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
-    @Environment(\.supportsRemoteScenes) private var supportsRemoteScenes
-    @State private var didRunStartupAutomation = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("VisionCraft Host")
-                .font(.title2.bold())
-
-            Text(appModel.diagnosticText)
-                .foregroundStyle(.secondary)
-
-            LabeledContent("Session", value: appModel.sessionState.rawValue)
-            LabeledContent("Remote scenes", value: appModel.supportsRemoteScenes ? "supported" : "unsupported")
-            LabeledContent("AR tracking", value: appModel.arTrackingState)
-            LabeledContent("Frames received", value: "\(appModel.framesReceived)")
-            LabeledContent("Last frame ID", value: "\(appModel.lastFrameId)")
-
-            Divider()
-
-            Text("Companion (Apple Vision Pro)")
-                .font(.headline)
-            LabeledContent("Relay", value: appModel.relayRunning ? "listening :\(appModel.relayPort)" : "stopped")
-            LabeledContent("Companion", value: appModel.relayViewerConnected ? "connected" : "waiting")
-            LabeledContent("Frames encoded", value: "\(appModel.framesEncoded)")
-
-            HStack {
-                Button("Start bridge") { appModel.startBridge() }
-                Button("Stop bridge") { appModel.stopBridge() }
-            }
-
-            HStack {
-                Button("Start relay") { appModel.startRelay() }
-                    .disabled(appModel.relayRunning)
-                Button("Stop relay") { appModel.stopRelay() }
-                    .disabled(!appModel.relayRunning)
-            }
-
-            HStack {
-                Button("Open immersive") {
-                    Task { await openImmersive() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("VisionCraft Host")
+                            .font(.largeTitle.bold())
+                        Text("Mac bridge and ALVR server for Apple Vision Pro.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    StatusPill(
+                        text: appModel.pipelineReady ? "Stream live" : "Setup in progress",
+                        color: appModel.pipelineReady ? .green : .orange
+                    )
                 }
-                .disabled(appModel.immersiveSpaceOpen)
 
-                Button("Close immersive") {
-                    Task { await closeImmersive() }
+                HostCard(title: "Next Step", systemImage: "arrow.forward.circle") {
+                    Text(appModel.nextStepTitle)
+                        .font(.title3.bold())
+                    Text(appModel.nextStepDetail)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
-                .disabled(!appModel.immersiveSpaceOpen)
-            }
 
-            Text("Run Minecraft with Apple Vision provider after the bridge is active. Use relay + companion for hand tracking, or open immersive for Mac remote display.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 14) {
+                    HostCard(title: "Setup", systemImage: "shippingbox") {
+                        StatusLine(
+                            label: "ALVR artifacts",
+                            value: appModel.setupArtifactsReady ? "ready" : "missing",
+                            ok: appModel.setupArtifactsReady
+                        )
+                        Text("Missing artifacts mean `scripts/vc.sh bootstrap` or `scripts/prepare-alvr.sh` has not completed.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HostCard(title: "Headset", systemImage: "visionpro") {
+                        StatusLine(label: "ALVR server", value: appModel.alvrRunning ? "running" : "stopped", ok: appModel.alvrRunning)
+                        StatusLine(label: "ALVRClient", value: appModel.alvrClientConnected ? "connected" : "waiting", ok: appModel.alvrClientConnected)
+                        StatusLine(label: "Target eye", value: "\(appModel.alvrTargetEyeWidth)x\(appModel.alvrTargetEyeHeight)", ok: appModel.alvrTargetEyeWidth > 0)
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    HostCard(title: "Bridge", systemImage: "cable.connector") {
+                        StatusLine(label: "Session", value: appModel.sessionState.rawValue, ok: appModel.sessionState == .ready)
+                        StatusLine(label: "Bridge port", value: "\(appModel.bridgePort)", ok: appModel.bridgeRunning)
+                        StatusLine(label: "Frames received", value: "\(appModel.framesReceived)", ok: appModel.framesReceived > 0)
+                        StatusLine(label: "Last frame ID", value: "\(appModel.lastFrameId)", ok: appModel.lastFrameId > 0)
+                    }
+
+                    HostCard(title: "Frame Source", systemImage: "gamecontroller") {
+                        StatusLine(label: "Frames encoded", value: "\(appModel.framesEncoded)", ok: appModel.framesEncoded > 0)
+                        StatusLine(label: "ALVR frames sent", value: "\(appModel.alvrFramesSent)", ok: appModel.alvrFramesSent > 0)
+                        Text("Use `scripts/vc.sh sender` for a test pattern, or `scripts/vc.sh mc` then press F7 in Minecraft.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HostCard(title: "Controls", systemImage: "switch.2") {
+                    HStack {
+                        Button("Start Bridge") { appModel.startBridge() }
+                            .disabled(appModel.bridgeRunning)
+                        Button("Stop Bridge") { appModel.stopBridge() }
+                            .disabled(!appModel.bridgeRunning)
+                        Divider()
+                        Button("Start ALVR") { appModel.startAlvr() }
+                            .disabled(appModel.alvrRunning)
+                        Button("Stop ALVR") { appModel.stopAlvr() }
+                            .disabled(!appModel.alvrRunning)
+                    }
+                    HStack {
+                        Button("Copy Verify Command") { appModel.copyVerifyCommand() }
+                        Button("Open Runbook") { appModel.openRunbook() }
+                        Button("Reveal Beta Bundle") { appModel.revealBetaBundle() }
+                    }
+                    Text(appModel.diagnosticText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(24)
         }
-        .padding(24)
         .onAppear {
             appModel.startControlApi()
-            appModel.setSupportsRemoteScenes(supportsRemoteScenes)
             if appModel.autoStartBridge {
                 appModel.startBridge()
             }
-            if appModel.autoStartRelay {
-                appModel.startRelay()
+            if appModel.autoStartAlvr {
+                appModel.startAlvr()
             }
         }
         .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
-            appModel.refreshRelayStats()
-        }
-        .task {
-            guard !didRunStartupAutomation else { return }
-            didRunStartupAutomation = true
-
-            if appModel.autoOpenImmersive {
-                await openImmersive()
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .visionCraftOpenImmersiveRequest)) { _ in
-            Task { await openImmersive() }
-        }
-        .onChange(of: supportsRemoteScenes) { _, supported in
-            appModel.setSupportsRemoteScenes(supported)
+            appModel.refreshAlvrStats()
         }
     }
+}
 
-    private func openImmersive() async {
-        guard !appModel.immersiveSpaceOpen else { return }
-        #if canImport(CompositorServices)
-        if #available(macOS 26.0, *) {
-            guard supportsRemoteScenes else {
-                appModel.diagnosticText = "Remote immersive scenes are unsupported or no Vision Pro is selectable"
-                return
-            }
-            let result = await openImmersiveSpace(id: VisionCraftImmersiveSpace.id)
-            if result == .opened {
-                appModel.onImmersiveSpaceOpened()
-            } else {
-                appModel.diagnosticText = "Failed to open immersive space: \(result). If the picker says No People Found, no Vision Pro target is discoverable."
-            }
-            return
+private struct HostCard<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+            content
         }
-        #endif
-        appModel.diagnosticText = "RemoteImmersiveSpace requires macOS 26 SDK"
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
+}
 
-    private func closeImmersive() async {
-        await dismissImmersiveSpace()
-        appModel.onImmersiveSpaceClosed()
+private struct StatusLine: View {
+    let label: String
+    let value: String
+    let ok: Bool
+
+    var body: some View {
+        HStack {
+            Circle()
+                .fill(ok ? Color.green : Color.orange)
+                .frame(width: 8, height: 8)
+            Text(label)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+private struct StatusPill: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption.bold())
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
     }
 }

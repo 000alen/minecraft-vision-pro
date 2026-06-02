@@ -217,15 +217,16 @@ public class VRInputAction {
      */
     public boolean isEnabled() {
         if (!this.isEnabledRaw(this.currentHand)) return false;
-        if (MCOpenVR.get() == null) return false;
+        MCVR runtime = MCVR.get();
+        if (runtime == null) return false;
 
         long lastOrigin = this.getLastOrigin();
-        ControllerType hand = MCOpenVR.get().getOriginControllerType(lastOrigin);
+        ControllerType hand = runtime.getOriginControllerType(lastOrigin);
 
         if (hand == null && this.isHanded()) return false;
 
         // iterate over all actions, and check if another action has a higher priority
-        for (VRInputAction action : MCOpenVR.get().getInputActions()) {
+        for (VRInputAction action : runtime.getInputActions()) {
             if (action != this && action.isEnabledRaw(hand) && action.isActive() &&
                 action.getPriority() > this.getPriority() && MCVR.get().getOrigins(action).contains(lastOrigin))
             {
@@ -282,6 +283,36 @@ public class VRInputAction {
 
     public boolean isHanded() {
         return this.keyBinding instanceof HandedKeyBinding;
+    }
+
+    public void updateDigital(ControllerType hand, boolean active, boolean state, long origin) {
+        DigitalData data = this.digitalDataForUpdate(hand);
+        data.isChanged = data.state != state || data.isActive != active;
+        data.state = state;
+        data.isActive = active;
+        data.activeOrigin = active ? origin : 0L;
+    }
+
+    public void updateAnalog(ControllerType hand, boolean active, float x, float y, float z, long origin) {
+        AnalogData data = this.analogDataForUpdate(hand);
+        data.deltaX = x - data.x;
+        data.deltaY = y - data.y;
+        data.deltaZ = z - data.z;
+        data.x = x;
+        data.y = y;
+        data.z = z;
+        data.isChanged = data.deltaX != 0.0F || data.deltaY != 0.0F || data.deltaZ != 0.0F ||
+            data.isActive != active;
+        data.isActive = active;
+        data.activeOrigin = active ? origin : 0L;
+    }
+
+    private DigitalData digitalDataForUpdate(ControllerType hand) {
+        return this.isHanded() ? this.digitalData[hand.ordinal()] : this.digitalData[0];
+    }
+
+    private AnalogData analogDataForUpdate(ControllerType hand) {
+        return this.isHanded() ? this.analogData[hand.ordinal()] : this.analogData[0];
     }
 
     /**

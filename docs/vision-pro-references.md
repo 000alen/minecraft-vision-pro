@@ -1,6 +1,6 @@
 # Apple Vision Pro — references for agents and developers
 
-Curated index for visionOS companion work, Mac remote immersive host, and shared compositor patterns. **Read this before querying external docs** so lookups stay on-target.
+Curated index for the ALVR-backed Vision Pro path. **Read this before querying external docs** so lookups stay on-target.
 
 Platform pins: **macOS 26+, visionOS 26+, Xcode 26+**.
 
@@ -9,33 +9,28 @@ Platform pins: **macOS 26+, visionOS 26+, Xcode 26+**.
 | Doc | Contents |
 |-----|----------|
 | [architecture.md](architecture.md) | End-to-end data flow, milestones |
-| [apple-spatial-rendering-notes.md](apple-spatial-rendering-notes.md) | RemoteImmersiveSpace, compositor, Metal interop |
-| [../bridge/protocol.md](../bridge/protocol.md) | `pose`, `hand`, `view_config`, `frame`, platform notes |
-| [../bridge/stream-protocol.md](../bridge/stream-protocol.md) | HEVC stream Mac ↔ companion |
-| [../AGENTS.md](../AGENTS.md) | Mac vs visionOS path split, golden files |
+| [../bridge/protocol.md](../bridge/protocol.md) | `pose`, `controller`, `hand`, `view_config`, `frame`, platform notes |
+| [../AGENTS.md](../AGENTS.md) | ALVR host/client layout, golden files |
 
 ## In-repo code samples (prefer over generic Apple samples)
 
-### On-device companion (`visionos-app/`)
+### ALVR client (`visionos-app/`)
 
 | Topic | File |
 |-------|------|
-| App + immersive scene | `Sources/VisionCraftCompanionApp.swift` |
-| ARKit auth + lifecycle | `Sources/AppModel.swift` |
-| Metal render loop + reprojection | `Sources/CompanionRenderer.swift` |
-| Pose / hand / recenter uplink | `Sources/TrackingUplink.swift` |
-| Pinch from joints | `Sources/HandPinch.swift` |
-| HEVC decode → Metal | `Sources/VideoStreamDecoder.swift` |
-| Stream client | `Sources/StreamClient.swift` |
-| Bring-up / pairing | `README.md` |
+| Xcode entry | `ALVRClient.xcodeproj` |
+| Client shader contract | `ALVRClient/Shaders.metal` |
+| Rust client build/repack | `build_and_repack.sh` |
+| Matching ALVR tree | `ALVR/` |
 
-### Mac remote display (`mac-host/`)
+### Mac ALVR host (`mac-host/`)
 
 | Topic | File |
 |-------|------|
-| RemoteImmersiveSpace + remote ARKit | `Sources/VisionCraftImmersiveContent.swift` |
-| Metal compositor | `Sources/CompositorRenderer.swift` |
-| Stream relay when companion joins | `Sources/StreamRelayCoordinator.swift` |
+| ALVR lifecycle + events | `Sources/AlvrServerCoordinator.swift` |
+| C ABI wrapper | `Sources/ALVRServerCoreShim.h` / `Sources/ALVRServerCoreShim.c` |
+| HEVC encode | `Sources/StereoFrameEncoder.swift` |
+| Java bridge | `Sources/JavaBridgeServer.swift` |
 
 ## Official Apple documentation
 
@@ -45,7 +40,6 @@ Platform pins: **macOS 26+, visionOS 26+, Xcode 26+**.
 |-----|-----|
 | Compositor Services | https://developer.apple.com/documentation/compositorservices |
 | CompositorLayer | https://developer.apple.com/documentation/compositorservices/compositorlayer |
-| RemoteImmersiveSpace (macOS → AVP) | https://developer.apple.com/documentation/swiftui/remoteimmersivespace |
 | ImmersiveSpace (visionOS) | https://developer.apple.com/documentation/swiftui/immersivespace |
 | Interacting with virtual content (passthrough context) | https://developer.apple.com/documentation/compositorservices/interacting-with-virtual-content-blended-with-passthrough |
 
@@ -66,10 +60,11 @@ Platform pins: **macOS 26+, visionOS 26+, Xcode 26+**.
 | upperLimbVisibility | https://developer.apple.com/documentation/swiftui/scene/upperlimbvisibility(_:) |
 | immersionStyle | https://developer.apple.com/documentation/swiftui/immersionstyle |
 
-### Video / Metal interop (stream path)
+### Video / Metal interop
 
 | API | URL |
 |-----|-----|
+| VideoToolbox compression | https://developer.apple.com/documentation/videotoolbox |
 | VideoToolbox decompression | https://developer.apple.com/documentation/videotoolbox |
 | CVMetalTextureCache | https://developer.apple.com/documentation/corevideo/cvmetaltexturecache |
 
@@ -88,31 +83,32 @@ Example query: *"HandTrackingProvider ARKitSession run authorization visionOS co
 
 | Feature | mac-host | visionos-app |
 |---------|----------|--------------|
-| `RemoteImmersiveSpace` | ✓ | ✗ |
-| `ImmersiveSpace` | ✗ | ✓ |
+| ALVR server_core | ✓ | ✗ |
+| ALVRClient render/decode | ✗ | ✓ |
 | `HandTrackingProvider` | ✗ (unavailable) | ✓ |
-| Head pose to Java | ✓ (local or relay) | ✓ (uplink) |
-| Hand pinch to Java | ✗ (mock/tests only) | ✓ |
+| Head pose to Java | ✓ (via ALVR event/device motion) | ✓ (source) |
+| Controller/pinch input to Java | ✓ (via raw ALVR button queue) | ✓ (source) |
 | HEVC | encode | decode |
-| Compositor reprojection | Mac compositor | On-device compositor |
+| Compositor reprojection | ✗ | ALVR client/on-device compositor |
 
 ## Product-specific decisions (not in Apple samples)
 
-1. **Foveation disabled** — game frames are uniform resolution; foveation would warp them (`ContentStageConfiguration`, mac host config).
-2. **Latest-frame-wins** — decoder and renderer drop stale frames under load.
-3. **`view_config` from device drawable** — Java uses real AVP frustum tangents and IPD.
-4. **Hand visible** — `.upperLimbVisibility(.visible)` so pinch feels direct.
-5. **Render thread off main actor** — UI hops via `AppModel.mainAsync`.
-6. **Relay suppresses Mac pose** — when companion is connected, uplink is authoritative.
+1. **Foveation disabled** — game frames are uniform resolution; foveation would warp them.
+2. **ALVR owns headset transport** — do not reimplement ALVR wire protocol in Swift.
+3. **`view_config` from device/ALVR** — Java uses real AVP frustum tangents and IPD.
+4. **Parameter sets out of band** — VPS/SPS/PPS go through `alvr_set_video_config_nals`.
+5. **ALVR suppresses fallback pose** — when ALVR is connected, its tracking is authoritative.
+6. **Controller state comes from raw ALVR inputs** — Java consumes `controller` first and keeps
+   `hand` only as a compatibility projection.
 
 ## Device bring-up checklist
 
 1. Vision Pro paired in Xcode → Devices and Simulators (same network / account).
 2. **Developer Mode** enabled on headset.
-3. Development Team set in generated Xcode projects (`scripts/gen-projects.sh`).
-4. Hand tracking: call `requestAuthorization(for: [.handTracking, .worldSensing])` before immersive transition.
-5. Validate pinch and immersive stage on **hardware** — simulator is insufficient for full tracking UX.
+3. ALVR artifacts prepared (`scripts/prepare-alvr.sh`).
+4. Development Team set for `visionos-app/ALVRClient.xcodeproj`.
+5. Validate decode, orientation, fusion, tracking, and controller mappings on **hardware**.
 
 ## SDK drift note
 
-`LayerRenderer` / drawable APIs may differ slightly in the shipping Xcode 26 SDK. After API changes, compile on Xcode 26 and adjust method names per compiler errors — do not invent signatures. See `mac-host/README.md` API notes.
+`LayerRenderer` / drawable APIs may differ slightly in the shipping Xcode 26 SDK. After API changes, compile on Xcode 26 and adjust method names per compiler errors — do not invent signatures.

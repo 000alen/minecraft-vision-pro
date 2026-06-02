@@ -1,183 +1,114 @@
-# VisionCraft runbook
+# VisionCraft Runbook
 
-The single, reproducible recipe for bringing the whole pipeline up — and the stale-state checks
-that keep it robust. Every Mac-side step is wrapped by **`scripts/vc.sh`** so there is no
-improvising. Wear the Apple Vision Pro only after the host is healthy (Phase B).
+The reproducible ALVR path is:
 
+```text
+Minecraft / bridge-test -> Java bridge :19735 -> VisionCraftHost -> ALVR server_core -> ALVRClient on Apple Vision Pro
 ```
+
+`scripts/vc.sh` wraps the Mac-side steps and stale-process checks.
+
+```bash
 scripts/vc.sh <command>
-  doctor      read-only health report (tools, ports, processes, host /status, AVP)
-  status      compact live status + a 1.5s frame-flow sample
-  clean       stop ALL VisionCraft processes (host, frame source, gradle daemons) + free ports
-  preflight   verify toolchain + regenerate Xcode projects if missing
-  host        clean + (re)launch VisionCraftHost; block until control API is healthy
-  companion   build + install + launch the companion on the paired AVP (best effort)
-  mc          launch the Minecraft Fabric dev client (openjdk@21) as the frame source
-  sender [n]  launch the headless test-pattern sender (n frames; 0 = continuous)
-  verify      assert the live stream is healthy (viewer connected, frames flowing, session ready)
+  bootstrap   first-run beta setup checks + artifact preparation
+  doctor      read-only health report
+  status      compact live status + frame-flow sample
+  clean       stop host/frame sources/gradle daemons and free ports
+  preflight   verify toolchain + generate projects if missing
+  package-beta build a local beta bundle under .run/beta
+  host        clean + launch VisionCraftHost
+  alvr-client open the vendored ALVRClient project and print AVP run steps
+  mc          launch the Minecraft Fabric dev client
+  sender [n]  launch the headless test-pattern sender
+  verify      assert ALVR client connected, session ready, frames flowing
   stop        alias for clean
 ```
 
-## System map
+## Ports
 
-```
- Minecraft (Java, Vivecraft Apple provider)                Apple Vision Pro
-        │  TCP 127.0.0.1:19735  (bridge / Java)                    │
-        ▼                                                          │  Bonjour _visioncraft-stream._tcp
- ┌─────────────────────── VisionCraftHost (macOS) ───────────────────────┐
- │  bridge :19735   receives RGBA eye frames + pose/view_config          │
- │  StereoFrameEncoder → HEVC                                            │
- │  relay  :19736   streams to the companion ◄───────────────────────────┘ (TCP 19736)
- │  control:19734   loopback HTTP automation (/health /status /bridge/* /relay/*)
- └───────────────────────────────────────────────────────────────────────┘
-```
+| Port | Role | Who connects |
+|---|---|---|
+| 19734 | Loopback control API | `vc.sh` / `curl` |
+| 19735 | Java bridge | Minecraft or the test sender |
 
-| Port  | Role | Who connects |
-|-------|------|--------------|
-| 19734 | Loopback control API (HTTP) | `vc.sh` / `curl` |
-| 19735 | Java bridge | Minecraft **or** the test sender (exactly one) |
-| 19736 | Stream relay (Bonjour `_visioncraft-stream._tcp`) | the AVP companion |
+ALVR owns headset discovery and streaming on its own LAN ports.
 
-**Critical ordering invariant:** the host never opens its own immersive space — the **companion
-connecting is what flips the bridge session to `ready`**. Minecraft refuses to submit frames
-("Session not ready") until the headset is in. So the order is always: **host → companion → game → F7.**
-
-**One frame source at a time.** Minecraft and the `sender` both attach to the bridge as the single
-Java client. `vc.sh mc` / `vc.sh sender` refuse to start if one is already connected — run
-`vc.sh clean` first.
-
-## Toolchain (one-time)
+## Setup
 
 ```bash
-brew install xcodegen openjdk@21
-scripts/vc.sh preflight     # verifies tools, regenerates *.xcodeproj if missing, prints doctor
+brew install xcodegen openjdk@21 rustup-init
+rustup-init -y
+source "$HOME/.cargo/env"
+export VISIONCRAFT_DEVELOPMENT_TEAM=<your Apple team id>
+export VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID=com.example.visioncraft.alvrclient
+scripts/vc.sh bootstrap
+scripts/vc.sh package-beta
 ```
 
-`preflight` must end with green checks for `xcodebuild`, `xcodegen`, `openjdk@21`, both xcodeprojects,
-and a connected AVP. Pair the headset first: on the AVP, **Settings ▸ General ▸ Remote Devices**, then
-**Pair** it in Xcode (same Wi-Fi + Bluetooth on).
+Pair the headset in Xcode first. On the AVP, open Settings, General, Remote Devices, then pair from Xcode. If `VISIONCRAFT_DEVELOPMENT_TEAM` is unset, the generated headset project leaves signing blank and Xcode will ask you to select a team before installing on-device.
 
----
+The beta bundle is written to `.run/beta`. Open `.run/beta/README-FIRST.txt` for the shortest local run instructions.
 
-## The recipe
+## Run
 
-### Phase A — start from a known-clean slate (handles stale processes)
+1. Start clean:
 
 ```bash
-scripts/vc.sh doctor    # inspect: stale host? leftover gradle daemons? ports held?
-scripts/vc.sh clean     # stop host + frame sources + gradle daemons; verify 19734/35/36 are free
+scripts/vc.sh clean
+scripts/vc.sh host --rebuild
 ```
 
-`clean` is always safe to run and idempotent. It stops Gradle daemons gracefully (`gradlew --stop`
-for both wrappers), severs any live bridge client, SIGTERM→SIGKILL the host, then **confirms each
-port is actually free** (escalating to kill the port holder if not). If it ever prints
-`✗ … STILL held`, something outside this repo owns the port — investigate before continuing.
-
-### Phase B — host (Mac only, no headset yet)
+2. Run the headset client:
 
 ```bash
-scripts/vc.sh host          # reuses the existing Debug build; add --rebuild after Swift/Metal edits
+scripts/vc.sh alvr-client
 ```
 
-✅ **Checkpoint B:** the command prints `✓ control API healthy on :19734` and
-`relay_running = true`, `diagnostic = Relay listening on :19736` / `Bonjour registered`.
-If it dies with "control API never responded", re-run `scripts/vc.sh host --rebuild`.
+Xcode opens `visionos-app/ALVRClient.xcodeproj`. Select the paired Apple Vision Pro, press Run, and allow the app permissions on-device.
+The headset UI shows a VisionCraft setup panel. If it stays on "Waiting for VisionCraftHost", run `scripts/vc.sh doctor` on the Mac and check artifacts, signing, firewall/network state, and whether the host is running.
 
-### Phase C — companion on the AVP (build + run from Xcode)
-
-The companion is built and run **from Xcode** — this is the reliable path:
+3. Start a frame source:
 
 ```bash
-scripts/vc.sh companion     # opens the project + prints the steps below
+scripts/vc.sh sender
+# or
+scripts/vc.sh mc
 ```
 
-1. Xcode opens `visionos-app/VisionCraftCompanion.xcodeproj`.
-2. In the run-destination menu, pick **Alen’s Apple Vision Pro**.
-3. Press **▶ (Cmd-R)** — Xcode builds, signs, installs, and launches on the headset.
-4. **Put on the AVP**, open **VisionCraft**, and tap **Enter VisionCraft**.
+For Minecraft, press F7 or the VR toggle after the title screen appears.
 
-> **Why not headless `xcodebuild`/`devicectl`?** The AVP exposes *two different identifiers*: the
-> CoreDevice UDID that `devicectl` uses (e.g. `D196DA96-…`) and the hardware id `xcodebuild
-> -destination id=` expects (e.g. `00008142-…`). Xcode's ▶ resolves the right id plus automatic
-> signing and provisioning in one step; a CLI flow is fragile against all three. Use Xcode.
-
-✅ **Checkpoint C:** on the Mac,
-
-```bash
-scripts/vc.sh status        # relay_viewer = true, session_state = ready
-```
-
-If `relay_viewer = false`, the companion did not reach the relay — confirm Mac + AVP are on the same
-network and re-tap Enter. (The app should not error opening the immersive space; that bug is fixed via
-`UIApplicationSupportsMultipleScenes`.)
-
-### Phase D — frame source
-
-Real game:
-
-```bash
-scripts/vc.sh mc            # launches the Fabric dev client with openjdk@21; logs to .run/minecraft.log
-# at the Minecraft title screen, press F7 (or the "VR: OFF" toggle) to enable VR
-```
-
-…or a deterministic test pattern (no game, no account) to isolate the video path:
-
-```bash
-scripts/vc.sh sender        # continuous checkerboards; logs to .run/sender.log
-```
-
-✅ **Checkpoint D — the gate before you trust what you see in the headset:**
+4. Verify:
 
 ```bash
 scripts/vc.sh verify
-#   ✓ companion connected to relay
-#   ✓ bridge session ready
-#   ✓ frames flowing (N → M)
-#   ==> STREAM LIVE
 ```
 
-Only when `verify` says **STREAM LIVE** is it worth judging the image in the headset.
+Expected result:
 
-### Phase E — tear down
-
-```bash
-scripts/vc.sh clean         # leaves ports free and no daemons running
+```text
+✓ ALVR client connected
+✓ bridge session ready
+✓ frames flowing (N -> M)
+==> STREAM LIVE
 ```
 
----
+## Controller Validation
 
-## Stale-process handling (what "robust" means here)
+Once video and head pose are stable on hardware, validate inputs in this order:
 
-`vc.sh` treats the following as the live source of truth, never assumptions:
+1. In `scripts/vc.sh status`, confirm ALVR is connected and the Java bridge is ready.
+2. In Minecraft, move the left thumbstick: forward/back/strafe should move the player.
+3. Move the right thumbstick horizontally: it should drive Vivecraft free-rotate/turn.
+4. Right trigger should attack/mine; left trigger should use/place.
+5. Squeeze/grip should drive VR interact and climb-grab bindings where those features are enabled.
+6. Right A/B should map to jump/sneak; left X/Y should map to inventory/radial menu.
+7. Menu/system click should open the in-game menu without fighting visionOS system gestures.
+8. Kill or quit ALVRClient while holding an input; all actions should release within one frame or one stale-input timeout.
 
-- **Ports** — `lsof -nP -iTCP:<port>`; `clean` frees 19734/19735/19736 and *verifies* they are free.
-- **Host** — matched by its bundle path, SIGTERM with a 3s grace window, then SIGKILL.
-- **Frame source** — detected as *any non-host process with an ESTABLISHED socket on :19735* (so it
-  catches an orphaned game/sender JVM even when the Gradle wrapper has exited).
-- **Gradle daemons** — stopped via `gradlew --stop` for both the root and `minecraft/VivecraftMod`
-  wrappers (they run different Gradle versions: 8.12 and 9.3.0).
+## Robustness Checks
 
-If you ever hit `Relay failed: Address already in use`, it means a previous host (or another process)
-still holds a port — `scripts/vc.sh clean` is the fix, and `doctor` shows you the culprit PID first.
+`vc.sh clean` stops Gradle daemons, severs bridge clients, terminates the host, and verifies loopback ports are free. `vc.sh doctor` reports toolchain availability, AVP presence, port holders, host PID, frame source PID, and `/status`.
 
-## Troubleshooting (symptom → check)
+Only one frame source can use the bridge at a time. If `vc.sh mc` or `vc.sh sender` refuses to start, run `scripts/vc.sh clean`.
 
-| Symptom | Command | What it tells you |
-|---|---|---|
-| "Is anything stale?" | `vc.sh doctor` | port holders, host PID, frame source, gradle daemons, AVP, `/status` |
-| Host won't start, port in use | `vc.sh clean` then `vc.sh host` | frees ports, relaunches; `doctor` names the PID |
-| Companion shows nothing | `vc.sh status` | `relay_viewer` must be `true`; else network/Enter issue |
-| "Session not ready" in Minecraft | `vc.sh status` | `session_state` must be `ready` → companion must be connected first |
-| Black/stuck image | `vc.sh verify` | `frames_encoded` must advance; if not, source is off or VR isn't toggled (F7) |
-| Two sources fighting | `vc.sh mc`/`sender` refuse | only one bridge client allowed — `vc.sh clean` |
-| Minecraft logs | `tail -f .run/minecraft.log` | game/Gradle output |
-| Test-sender logs | `tail -f .run/sender.log` | headless pattern output |
-
-## Notes
-
-- `vc.sh` is bash 3.2-compatible (stock macOS `/bin/bash`) and reads/writes only loopback + local files.
-- Background logs and pidfiles live in `.run/` (git-ignored).
-- The control API is **loopback-only** by design (it can start/stop services), so these commands must
-  run on the same Mac as the host.
-- For the deeper build details (Gradle/XcodeGen, why openjdk@21), see [build.md](build.md).
-```
+`vc.sh preflight` verifies real ALVR artifacts, not just project folders. Missing `ALVRClientCore.xcframework`, `alvr_server_core.h`, or `libalvr_server_core.dylib` causes it to run `scripts/prepare-alvr.sh`.

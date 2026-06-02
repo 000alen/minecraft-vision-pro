@@ -21,10 +21,8 @@ targets:
     platform: macOS
     sources:
       - path: Sources
-      # Code shared with the visionOS companion (wire protocol, stereo math, Metal library).
-      # Single source of truth — compiled into both apps; see shared/README.md.
+      # Code shared with the Java bridge and ALVR adapter.
       - path: ../shared/Sources
-      - path: ../shared/Shaders
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: visioncraft.host
@@ -32,11 +30,38 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         ENABLE_HARDENED_RUNTIME: "YES"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: GBH6W69TD8           # Apple Development team (i000alen@icloud.com)
+        DEVELOPMENT_TEAM: $(VISIONCRAFT_DEVELOPMENT_TEAM)
         SWIFT_EMIT_LOC_STRINGS: "YES"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/VisionCraftHost-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Sources
+          - $(SRCROOT)/Vendor/ALVRServerCore
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Vendor/ALVRServerCore
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lalvr_server_core
         LD_RUNPATH_SEARCH_PATHS:
           - $(inherited)
           - "@executable_path/../Frameworks"
+    preBuildScripts:
+      - name: Prepare ALVR Artifacts
+        script: |
+          "$SRCROOT/../scripts/prepare-alvr.sh"
+    postBuildScripts:
+      - name: Embed ALVR server_core
+        script: |
+          set -euo pipefail
+          mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          cp "$SRCROOT/Vendor/ALVRServerCore/libalvr_server_core.dylib" \
+            "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/libalvr_server_core.dylib"
+          dylib="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/libalvr_server_core.dylib"
+          if [[ "${CODE_SIGNING_ALLOWED:-YES}" != "NO" && -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
+            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$dylib"
+          else
+            codesign --force --sign - "$dylib" >/dev/null 2>&1 || true
+          fi
 
 schemes:
   VisionCraftHost:

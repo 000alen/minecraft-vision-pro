@@ -2,7 +2,7 @@
 
 > **Running the full pipeline?** Use the reproducible recipe in [runbook.md](runbook.md)
 > (driven by `scripts/vc.sh`) — it handles stale processes, port conflicts, and the
-> host → companion → game → F7 ordering. This file covers the underlying build details.
+> host → ALVRClient → game → F7 ordering. This file covers the underlying build details.
 
 ## Hardware & OS
 
@@ -22,20 +22,30 @@
 
 Update the vendored tree only deliberately after M5; document new upstream SHA in `VENDORED.md`.
 
-## Native host (mac-host)
+## Native Host and ALVR Artifacts
 
 ```bash
-cd mac-host
-open VisionCraftHost.xcodeproj
+export VISIONCRAFT_DEVELOPMENT_TEAM=<your Apple team id>
+export VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID=com.example.visioncraft.alvrclient
+scripts/vc.sh bootstrap
 ```
 
-1. Select **My Mac** as run destination.
-2. Sign with your Apple ID (personal team is fine for local M0 — confirm Compositor entitlements).
-3. Pair Vision Pro via Xcode → Devices.
-4. Run; use in-app control to open **Remote Immersive Space**.
+`bootstrap` checks prerequisites, initializes the vendored `alvr-visionos` tree, applies VisionCraft defaults, generates projects, builds `alvr_client_core`, builds the macOS `alvr_server_core` dylib/header, and places server artifacts under `mac-host/Vendor/ALVRServerCore/`.
 
-**M0 acceptance:** stereoscopic content and head tracking on Vision Pro. The
-10-minute wear test is deferred while playable Minecraft is prioritized.
+For a local compile-only host build without a command-line signing identity:
+
+```bash
+xcodebuild -project mac-host/VisionCraftHost.xcodeproj -scheme VisionCraftHost \
+  -configuration Debug -derivedDataPath mac-host/build CODE_SIGNING_ALLOWED=NO build
+```
+
+To run on hardware, use:
+
+```bash
+scripts/vc.sh alvr-client
+```
+
+This opens `visionos-app/ALVRClient.xcodeproj`. Choose the paired Apple Vision Pro and press Run. Xcode/TestFlight signing is still required for AVP installation.
 
 ### Automation hooks
 
@@ -44,12 +54,12 @@ variables or equivalent launch arguments:
 
 ```bash
 VISIONCRAFT_BRIDGE_PORT=19735
-VISIONCRAFT_AUTO_OPEN_IMMERSIVE=1
 VISIONCRAFT_NO_AUTO_START_BRIDGE=1
+VISIONCRAFT_NO_AUTO_START_ALVR=1
+VISIONCRAFT_CODE_SIGNING_ALLOWED=NO
 ```
 
-Equivalent launch arguments are `--bridge-port 19735`, `--auto-open-immersive`,
-and `--no-auto-start-bridge`.
+Equivalent launch arguments are `--bridge-port 19735` and `--no-auto-start-bridge`.
 
 The host also starts a loopback-only HTTP control API on port `19734` by default
 (`VISIONCRAFT_CONTROL_PORT` or `--control-port` overrides it):
@@ -59,39 +69,19 @@ curl http://127.0.0.1:19734/health
 curl http://127.0.0.1:19734/status
 curl -X POST 'http://127.0.0.1:19734/bridge/start?port=19735'
 curl -X POST http://127.0.0.1:19734/bridge/stop
-curl -X POST http://127.0.0.1:19734/immersive/open
+curl -X POST 'http://127.0.0.1:19734/alvr/start?synthetic=true'
+curl -X POST http://127.0.0.1:19734/alvr/stop
 ```
 
-`/immersive/open` schedules SwiftUI's `openImmersiveSpace` from the host window,
-which lets scripts drive simulator/device smoke tests without clicking the
-button manually. `/status` reports `supports_remote_scenes`,
-`remote_device_identifier_available`, and `ar_tracking_state`.
+`/status` reports ALVR server/client connection, target eye size, frame counters, bridge session state, and diagnostics.
 
-If Apple's picker opens and says **No People Found**, the Mac supports remote
-scene presentation but no nearby/shareable Vision Pro target is discoverable.
-That is an M0 hardware gate, not a Java bridge failure. Keep the host running,
-make the Vision Pro discoverable from the same Apple ID/developer setup, then
-retry:
-
-```bash
-curl -X POST http://127.0.0.1:19734/immersive/open
-```
-
-After selecting the Vision Pro, check the renderer diagnostics:
+After launching ALVRClient, check:
 
 ```bash
 curl http://127.0.0.1:19734/status
 ```
 
-For M0 visual validation, expect `immersive_open: true`,
-`remote_device_identifier_available: true`, `renderer_layer_state: "running"`,
-`renderer_last_view_count: 2`, `renderer_last_drawable_count: 1`,
-`renderer_last_anchor_state: "available"`, `renderer_last_command_buffer_status: "4"`,
-and `renderer_last_error` beginning with `none`. The headset should show a
-depth-writing, world-anchored stereo panel with distinct left/right colors. If
-it is black, verify the debug renderer is writing depth as well as color.
-If `ar_tracking_state` stays at `starting`, the remote ARKit session did not
-finish starting and the renderer intentionally has not attached yet.
+For ALVR validation, expect `alvr_running: true`, `alvr_client_connected: true`, `session_state: "ready"`, and `alvr_frames_sent` advancing once a frame source is active.
 
 ## Bridge tests (any OS with Java 21)
 
@@ -113,8 +103,7 @@ The current Fabric artifact is written to
 `minecraft/VivecraftMod/build/libs/vivecraft-26.1.2-1.3.10-fabric.jar`.
 Install that JAR in the Minecraft Fabric profile's `mods/` directory with the
 matching Fabric loader setup. Default VR plugin is **Apple Vision**. Launch
-**VisionCraftHost**, start the bridge, and open the immersive space before
-enabling VR.
+**VisionCraftHost** and **ALVRClient**, then enable VR.
 
 ## Running Minecraft on the headset (dev client — no launcher/account)
 
@@ -127,22 +116,21 @@ on the classpath — no Microsoft account, no `mods/` copy, no installed profile
 
 ```bash
 # from minecraft/VivecraftMod
-env JAVA_HOME="$(brew --prefix openjdk@21)" PATH="$(brew --prefix openjdk@21)/bin:$PATH" \
+env JAVA_HOME="$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home" \
+  PATH="$(brew --prefix openjdk@21)/bin:$PATH" \
   ./gradlew :fabric:runClient
 ```
 
 In-game: at the title screen press **F7** (or click the `VR: OFF` toggle) to enable VR.
 The Apple Vision provider then connects to the loopback bridge on `127.0.0.1:19735`.
 
-### Companion-relay ordering (current architecture)
+### ALVR Ordering
 
-In the companion path the Mac never opens its own immersive space — the **companion
-connecting** is what makes the bridge session `ready`, so Minecraft will refuse to
-submit frames ("Session not ready") until the headset is in. Order:
+ALVRClient connecting is what makes the bridge session `ready`, so Minecraft will refuse to submit frames ("Session not ready") until the headset is in. Order:
 
 ```text
-1. Run VisionCraftHost            # auto-starts control API :19734, bridge :19735, relay :19736
-2. Companion → Enter VisionCraft  # connects over Bonjour; bridge session -> ready
+1. Run VisionCraftHost            # auto-starts control API :19734, bridge :19735, ALVR server_core
+2. Run ALVRClient on AVP          # connects to server_core; bridge session -> ready
 3. ./gradlew :fabric:runClient    # launch the game (openjdk@21 as above)
 4. Press F7 in-game               # VR ON -> real eye frames flow to the headset
 ```
@@ -150,19 +138,26 @@ submit frames ("Session not ready") until the headset is in. Order:
 Headless frame-source sanity check without the game (continuous test pattern):
 
 ```bash
-./gradlew :bridge-test:run        # streams checkerboards until Ctrl-C; needs the companion connected
+./gradlew :bridge-test:run        # streams checkerboards until Ctrl-C; needs ALVRClient connected
 ```
 
 Watch the pipeline from the loopback control API:
 
 ```bash
-curl -s http://127.0.0.1:19734/status   # relay_viewer_connected, frames_encoded, session_state, poses via logs
+curl -s http://127.0.0.1:19734/status   # alvr_client_connected, frames_encoded, session_state
 ```
 
-## Packaging (post-MVP)
+## Packaging
 
-Not required for MVP. Future deliverables:
+Create the local beta bundle with:
+
+```bash
+scripts/vc.sh package-beta
+```
+
+The bundle is written to `.run/beta` and contains:
 
 - `VisionCraftHost.app`
 - Fabric mod JAR
-- Launcher profile JSON + install script
+- `README-FIRST.txt`
+- headset install notes for the signed ALVRClient Xcode/TestFlight step

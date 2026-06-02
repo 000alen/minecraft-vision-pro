@@ -29,7 +29,7 @@ class BridgeIntegrationTest {
                 bridge.sendFrame(new AppleNativeBridge.FramePacket(
                     1L, System.nanoTime(),
                     w, h, left, w, h, right,
-                    0.05f, 512f
+                    0.05f, 512f, null
                 ));
 
                 waitForFrames(host, 1, 3_000);
@@ -86,6 +86,29 @@ class BridgeIntegrationTest {
                 assertEquals(0.05f, hands.left().pinch(), 1e-4f);
                 // Advisory wrist position round-trips.
                 assertEquals(0.2f, hands.right().positionM()[0], 1e-4f);
+            }
+        }
+    }
+
+    @Test
+    void clientReceivesControllerState() throws Exception {
+        try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
+            host.start();
+            try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", host.getBoundPort())) {
+                bridge.connect();
+                waitForSession(bridge, 5_000);
+                waitForControllers(bridge, 3_000);
+
+                AppleNativeBridge.ControllerState state = bridge.getControllerState();
+                assertTrue(state.left().tracked());
+                assertTrue(state.right().tracked());
+                assertTrue(state.left().button("x"));
+                assertTrue(state.right().button("a"));
+                assertTrue(state.right().button("trigger_click"));
+                assertEquals(0.25f, state.left().axis("thumbstick_x"), 1e-4f);
+                assertEquals(-0.5f, state.left().axis("thumbstick_y"), 1e-4f);
+                assertEquals(1.0f, state.right().axis("trigger"), 1e-4f);
+                assertEquals(0.2f, state.right().positionM()[0], 1e-4f);
             }
         }
     }
@@ -173,6 +196,17 @@ class BridgeIntegrationTest {
             Thread.sleep(20);
         }
         fail("No hand message");
+    }
+
+    private static void waitForControllers(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (bridge.getControllerState().timestampNs() > 0) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("No controller message");
     }
 
     private static void waitForPoses(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {

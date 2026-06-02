@@ -1701,7 +1701,7 @@ public class MCOpenVR extends MCVR {
      * @param inputValueHandle inputHandle to check
      * @return what controller the inputHandle is on, {@code null} if the handle or device is invalid
      */
-    protected ControllerType getOriginControllerType(long inputValueHandle) {
+    public ControllerType getOriginControllerType(long inputValueHandle) {
         if (inputValueHandle != k_ulInvalidInputValueHandle) {
             this.readOriginInfo(inputValueHandle);
 

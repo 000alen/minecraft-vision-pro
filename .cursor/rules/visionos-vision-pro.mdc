@@ -1,33 +1,32 @@
 ---
-description: visionOS / Apple Vision Pro companion — mandatory doc research before edits
+description: vendored ALVR visionOS client — mandatory doc research before edits
 globs: visionos-app/**/*
 alwaysApply: false
 ---
 
-# visionOS companion (Apple Vision Pro)
+# ALVR visionOS client (Apple Vision Pro)
 
-Applies to `visionos-app/`. This app runs **on the headset**: immersive Metal rendering, HEVC decode, head + hand uplink.
+Applies to `visionos-app/`. This is the vendored `alvr-visionos` client. Prefer keeping it close to upstream and applying VisionCraft-specific build/signing/default patches through `scripts/prepare-alvr.sh`.
 
 ## Path constraints
 
-- Use `ImmersiveSpace` + `CompositorLayer` — never `RemoteImmersiveSpace`.
-- `HandTrackingProvider` and on-device hand pinch are **in scope here only**.
-- Match threading: compositor closure is off main actor; UI updates via `AppModel.mainAsync`.
+- Do not rewrite ALVR protocol/decode/rendering code unless the matching `alvr_server_core` tree is updated at the same time.
+- Keep foveation and audio disabled for uniform Minecraft frames unless the ALVR settings and Mac encoder path are changed together.
+- Use the ALVR client shader/decode contract: Annex-B HEVC, side-by-side stereo, no vertical flip.
 
 ## Required research (before writing code)
 
-1. Read in-repo: `VisionCraftCompanionApp.swift`, `AppModel.swift`, `CompanionRenderer.swift`, `TrackingUplink.swift`, `HandPinch.swift`.
-2. Read [docs/vision-pro-references.md](../../docs/vision-pro-references.md) and `bridge/protocol.md` (`pose`, `hand`, `view_config`).
-3. Context7: library `/websites/developer_apple` — query the exact API (e.g. `HandTrackingProvider`, `CompositorLayer`, `LayerRenderer`).
+1. Read in-repo: `ALVRClient.xcodeproj`, `ALVRClient/Shaders.metal`, `build_and_repack.sh`, and the matching `ALVR/` submodule files.
+2. Read [docs/vision-pro-references.md](../../docs/vision-pro-references.md) and `bridge/protocol.md` (`pose`, `controller`, `hand`, `view_config`) when touching Java bridge-facing behavior.
+3. Context7: library `/websites/developer_apple` — query the exact API for visionOS APIs you change.
 4. If Context7 is insufficient, fetch the official documentation page or visionOS article.
 5. Output **research notes** (links + which repo file is precedent) before proposing a diff.
 
 ## Vision Pro behavior to preserve
 
-- Compositor **reprojects** submitted frames to live head pose — see `CompanionRenderer` comments.
-- Foveation stays **disabled** (`ContentStageConfiguration`) for uniform game frames.
-- `view_config` from the real device drawable drives Java frustum — do not clamp to symmetric FOV.
-- Hand uplink uses `bridge/protocol.md` JSON shape; untracked hands → no input.
+- ALVR client/server protocol compatibility depends on building both cores from the same ALVR tree.
+- Foveation stays disabled for uniform game frames.
+- `view_config` from the real device drives Java frustum — do not clamp to symmetric FOV.
 
 ## Hardware
 

@@ -1,5 +1,9 @@
 # VisionCraft companion stream protocol v1
 
+> Retired: the custom Mac relay / native VisionCraft companion transport has been replaced by
+> ALVRClient + `alvr_server_core`. This document is retained only as historical design context.
+> Current Java loopback messages are documented in `bridge/protocol.md`.
+
 This is the **Mac ↔ Apple Vision Pro** transport for the native-companion architecture.
 It is distinct from `bridge/protocol.md`, which is the **loopback** IPC between Minecraft
 (Java) and a Mac-side process.

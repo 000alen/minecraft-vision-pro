@@ -12,6 +12,8 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -40,6 +42,7 @@ public final class AppleNativeBridge implements AutoCloseable {
     private volatile SessionState sessionState = SessionState.CLOSED;
     private volatile ViewConfig latestViewConfig = null;
     private volatile HandState latestHands = HandState.empty();
+    private volatile ControllerState latestControllerState = ControllerState.empty();
 
     private Socket socket;
     private BufferedOutputStream out;
@@ -90,6 +93,8 @@ public final class AppleNativeBridge implements AutoCloseable {
         out = new BufferedOutputStream(socket.getOutputStream());
         connected.set(true);
         sessionState = SessionState.CLOSED;
+        latestControllerState = ControllerState.empty();
+        latestHands = HandState.empty();
         readerThread = new Thread(() -> readLoop(in), "visioncraft-bridge-reader");
         readerThread.setDaemon(true);
         readerThread.start();
@@ -114,6 +119,8 @@ public final class AppleNativeBridge implements AutoCloseable {
         } finally {
             connected.set(false);
             sessionState = SessionState.CLOSED;
+            latestControllerState = ControllerState.empty();
+            latestHands = HandState.empty();
         }
     }
 
@@ -164,6 +171,12 @@ public final class AppleNativeBridge implements AutoCloseable {
                     HandState parsed = parseHands(obj);
                     if (parsed != null) {
                         latestHands = parsed;
+                    }
+                }
+                case "controller" -> {
+                    ControllerState parsed = parseControllerState(obj);
+                    if (parsed != null) {
+                        latestControllerState = parsed;
                     }
                 }
                 case "recenter" -> {
@@ -257,6 +270,66 @@ public final class AppleNativeBridge implements AutoCloseable {
         return new HandState(left, right);
     }
 
+    /**
+     * Parse a full controller message. Missing hands default to untracked so a partial update
+     * releases stale input from the absent side.
+     */
+    private static ControllerState parseControllerState(JsonObject obj) {
+        if (!obj.has("controllers")) {
+            return null;
+        }
+        long timestampNs = obj.has("timestamp_ns") ? obj.get("timestamp_ns").getAsLong() : 0L;
+        com.google.gson.JsonArray controllers = obj.getAsJsonArray("controllers");
+        Controller left = Controller.untracked();
+        Controller right = Controller.untracked();
+        for (int i = 0; i < controllers.size(); i++) {
+            JsonObject c = controllers.get(i).getAsJsonObject();
+            if (!c.has("hand")) {
+                continue;
+            }
+            boolean tracked = c.has("tracked") && c.get("tracked").getAsBoolean();
+            float[] pos = c.has("position_m") ? parseFloatArray(c.getAsJsonArray("position_m"), 3)
+                : new float[]{0f, 0f, 0f};
+            float[] ori = c.has("orientation_xyzw") ? parseFloatArray(c.getAsJsonArray("orientation_xyzw"), 4)
+                : new float[]{0f, 0f, 0f, 1f};
+            Controller controller = new Controller(
+                tracked,
+                parseBooleanMap(c, "buttons"),
+                parseFloatMap(c, "axes"),
+                pos,
+                ori
+            );
+            if ("left".equals(c.get("hand").getAsString())) {
+                left = controller;
+            } else {
+                right = controller;
+            }
+        }
+        return new ControllerState(timestampNs, left, right);
+    }
+
+    private static Map<String, Boolean> parseBooleanMap(JsonObject obj, String key) {
+        if (!obj.has(key) || !obj.get(key).isJsonObject()) {
+            return Map.of();
+        }
+        Map<String, Boolean> values = new HashMap<>();
+        for (Map.Entry<String, com.google.gson.JsonElement> entry : obj.getAsJsonObject(key).entrySet()) {
+            values.put(entry.getKey(), entry.getValue().getAsBoolean());
+        }
+        return Map.copyOf(values);
+    }
+
+    private static Map<String, Float> parseFloatMap(JsonObject obj, String key) {
+        if (!obj.has(key) || !obj.get(key).isJsonObject()) {
+            return Map.of();
+        }
+        Map<String, Float> values = new HashMap<>();
+        for (Map.Entry<String, com.google.gson.JsonElement> entry : obj.getAsJsonObject(key).entrySet()) {
+            values.put(entry.getKey(), entry.getValue().getAsFloat());
+        }
+        return Map.copyOf(values);
+    }
+
     public synchronized void sendFrame(FramePacket frame) throws IOException {
         ensureConnected();
         if (sessionState != SessionState.READY) {
@@ -320,6 +393,24 @@ public final class AppleNativeBridge implements AutoCloseable {
         out.flush();
     }
 
+    public synchronized void sendHaptic(
+        String hand,
+        float durationSeconds,
+        float frequencyHz,
+        float amplitude
+    ) throws IOException {
+        ensureConnected();
+        JsonObject msg = new JsonObject();
+        msg.addProperty("type", "haptic");
+        msg.addProperty("version", PROTOCOL_VERSION);
+        msg.addProperty("hand", hand);
+        msg.addProperty("duration_s", durationSeconds);
+        msg.addProperty("frequency_hz", frequencyHz);
+        msg.addProperty("amplitude", amplitude);
+        writeLine(msg);
+        out.flush();
+    }
+
     private void writeLine(JsonObject obj) throws IOException {
         byte[] bytes = (GSON.toJson(obj) + "\n").getBytes(StandardCharsets.UTF_8);
         out.write(bytes);
@@ -353,6 +444,11 @@ public final class AppleNativeBridge implements AutoCloseable {
         return latestHands;
     }
 
+    /** Latest ALVR controller input state. Never {@code null}; both hands untracked until reported. */
+    public ControllerState getControllerState() {
+        return latestControllerState;
+    }
+
     public int getRecenterCounter() {
         return recenterCounter.get();
     }
@@ -365,6 +461,8 @@ public final class AppleNativeBridge implements AutoCloseable {
     public synchronized void close() {
         connected.set(false);
         sessionState = SessionState.CLOSED;
+        latestControllerState = ControllerState.empty();
+        latestHands = HandState.empty();
         if (socket != null) {
             try {
                 socket.close();
@@ -434,6 +532,34 @@ public final class AppleNativeBridge implements AutoCloseable {
     public record HandState(Hand left, Hand right) {
         public static HandState empty() {
             return new HandState(Hand.untracked(), Hand.untracked());
+        }
+    }
+
+    /** A controller's current binary/axis input and advisory wrist/controller pose. */
+    public record Controller(
+        boolean tracked,
+        Map<String, Boolean> buttons,
+        Map<String, Float> axes,
+        float[] positionM,
+        float[] orientationXyzw
+    ) {
+        public static Controller untracked() {
+            return new Controller(false, Map.of(), Map.of(), new float[]{0f, 0f, 0f}, new float[]{0f, 0f, 0f, 1f});
+        }
+
+        public boolean button(String name) {
+            return buttons.getOrDefault(name, false);
+        }
+
+        public float axis(String name) {
+            return axes.getOrDefault(name, 0f);
+        }
+    }
+
+    /** Latest state for both ALVR controller hands. */
+    public record ControllerState(long timestampNs, Controller left, Controller right) {
+        public static ControllerState empty() {
+            return new ControllerState(0L, Controller.untracked(), Controller.untracked());
         }
     }
 

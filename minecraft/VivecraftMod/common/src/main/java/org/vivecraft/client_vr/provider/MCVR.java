@@ -1535,6 +1535,14 @@ public abstract class MCVR {
     public abstract List<Long> getOrigins(VRInputAction action);
 
     /**
+     * @param origin active input origin handle
+     * @return controller represented by the origin, or {@code null} if the origin is unknown
+     */
+    public ControllerType getOriginControllerType(long origin) {
+        return null;
+    }
+
+    /**
      * @param origin the origin handle of an input action
      * @return String describing what button/input the given origin is pointing to
      */

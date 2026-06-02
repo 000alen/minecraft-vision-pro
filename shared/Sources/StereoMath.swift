@@ -1,11 +1,8 @@
 import Foundation
 import simd
 
-// Stereo / projection math shared by the macOS host (`CompositorRenderer`) and the visionOS
-// companion (`CompanionRenderer`). Compiled into both targets via XcodeGen
-// (`sources: ../shared/Sources`). These are pure Foundation + simd (no CompositorServices), so the
-// host and companion always agree on frustum tangents, the `view_config` JSON, and the debug MVP —
-// the geometry the two ends *must* compute identically for stereo frames to fuse.
+// Stereo / projection math used by the macOS host to serialize `view_config` for the Java bridge.
+// Pure Foundation + simd so it remains independent of ALVR and Apple compositor APIs.
 enum StereoMath {
     /// POSIX locale so JSON always uses `.` decimal separators (never `1,5` on European locales).
     private static let jsonNumberLocale = Locale(identifier: "en_US_POSIX")
@@ -81,9 +78,8 @@ enum StereoMath {
         let height: Int
     }
 
-    /// Serialize a `bridge/protocol.md` `view_config` line (newline-terminated). Both the host and
-    /// the companion build this identically — Minecraft renders the asymmetric per-eye frustum it
-    /// describes, so a single serializer keeps the geometry contract in one place.
+    /// Serialize a `bridge/protocol.md` `view_config` line (newline-terminated). Minecraft renders
+    /// the asymmetric per-eye frustum it describes, so this keeps the geometry contract in one place.
     static func viewConfigJSON(eyes: [EyeView], ipdMeters: Float) -> String {
         let eyeFragments = eyes.map { eye in
             "{\"index\":\(eye.index),\"tangents\":[\(fmt(eye.tangents.x)),\(fmt(eye.tangents.y)),\(fmt(eye.tangents.z)),\(fmt(eye.tangents.w))],\"width\":\(eye.width),\"height\":\(eye.height)}"

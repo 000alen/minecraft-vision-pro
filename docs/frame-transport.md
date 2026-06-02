@@ -1,5 +1,9 @@
 # Frame transport
 
+> Retired design notes: this file describes the pre-ALVR Metal compositor transport. The current
+> runtime still accepts raw RGBA frames over `bridge/protocol.md`, then encodes side-by-side HEVC and
+> submits it through ALVR `server_core`.
+
 ## MVP path (implemented)
 
 ```text

@@ -18,9 +18,8 @@ enum BridgeServerError: Error, CustomStringConvertible {
 /// there is no cross-thread mutation of the connection table.
 final class JavaBridgeServer {
     weak var appModel: VisionCraftAppModel?
-    weak var compositor: CompositorRenderer?
     weak var posePublisher: PosePublisher?
-    weak var relay: StreamRelayCoordinator?
+    weak var alvr: AlvrServerCoordinator?
 
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: BridgeConnection] = [:]
@@ -65,9 +64,8 @@ final class JavaBridgeServer {
         }
     }
 
-    /// Forward a verbatim `bridge/protocol.md` line received over the companion uplink (pose /
-    /// hand / view_config / recenter) to all connected Java clients. The companion is the
-    /// authoritative source for these while it is connected.
+    /// Forward a verbatim `bridge/protocol.md` line received from ALVR tracking/view events to all
+    /// connected Java clients. The headset is the authoritative source while it is connected.
     func forwardUplink(_ line: String) {
         broadcast(line)
     }
@@ -92,11 +90,8 @@ final class JavaBridgeServer {
                 self?.appModel?.lastFrameId = frameId
                 self?.appModel?.framesReceived += 1
             }
-            // Local immersive path (RemoteImmersiveSpace) and the companion relay path are
-            // independent sinks for the same frame; either, both, or neither may be active.
-            self?.compositor?.uploadFrame(left: left, right: right, width: w, height: h)
-            self?.relay?.submitFrame(left: left, right: right, width: w, height: h,
-                                     frameId: frameId, renderOrientation: renderOrientation)
+            self?.alvr?.submitFrame(left: left, right: right, eyeWidth: w, eyeHeight: h,
+                                    frameId: frameId, renderOrientation: renderOrientation)
         }
         bridge.onLine = { [weak self] line in
             self?.handleClientLine(line, bridge: bridge)
@@ -136,17 +131,43 @@ final class JavaBridgeServer {
 
         switch type {
         case "recenter":
-            posePublisher?.recenter()
-            let counter = posePublisher?.recenterCounter ?? 0
+            let counter: UInt64
+            if let alvrCounter = alvr?.recordRecenter() {
+                counter = alvrCounter
+            } else {
+                posePublisher?.recenter()
+                counter = UInt64(posePublisher?.recenterCounter ?? 0)
+            }
             let line = "{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n"
             broadcast(line)
-            relay?.forwardDownlink(line)
         case "ping":
             if let ts = obj["timestamp_ns"] {
                 bridge.send("{\"type\":\"pong\",\"version\":1,\"timestamp_ns\":\(ts)}\n")
             }
+        case "haptic":
+            guard let hand = obj["hand"] as? String,
+                  hand == "left" || hand == "right" else { break }
+            let duration = Self.floatField(obj["duration_s"], fallback: 0.02)
+            let frequency = Self.floatField(obj["frequency_hz"], fallback: 120)
+            let amplitude = Self.floatField(obj["amplitude"], fallback: 0.5)
+            alvr?.sendHaptics(hand: hand, durationSeconds: duration, frequency: frequency, amplitude: amplitude)
         default:
             break
+        }
+    }
+
+    private static func floatField(_ value: Any?, fallback: Float) -> Float {
+        switch value {
+        case let value as Float:
+            return value
+        case let value as Double:
+            return Float(value)
+        case let value as Int:
+            return Float(value)
+        case let value as NSNumber:
+            return value.floatValue
+        default:
+            return fallback
         }
     }
 }

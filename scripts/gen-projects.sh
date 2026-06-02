@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate the Xcode projects for both native apps from their `project.yml` specs.
+# Regenerate the Mac host Xcode project from its `project.yml` spec.
 # The generated `*.xcodeproj` bundles are git-ignored build artifacts; run this after a fresh
 # clone or whenever you add/remove/rename source files.
 #
@@ -13,12 +13,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-for app in mac-host visionos-app; do
-  spec="$repo_root/$app/project.yml"
-  if [[ -f "$spec" ]]; then
-    echo "==> Generating $app/*.xcodeproj"
-    (cd "$repo_root/$app" && xcodegen generate --spec project.yml)
-  fi
-done
+echo "==> Generating mac-host/*.xcodeproj"
+(cd "$repo_root/mac-host" && xcodegen generate --spec project.yml)
 
-echo "Done. Open mac-host/VisionCraftHost.xcodeproj or visionos-app/VisionCraftCompanion.xcodeproj."
+echo "Done. Open mac-host/VisionCraftHost.xcodeproj. The headset client is visionos-app/ALVRClient.xcodeproj."

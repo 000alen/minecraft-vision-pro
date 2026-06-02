@@ -5,15 +5,15 @@
 Play **Minecraft Java Edition in VR** using only:
 
 ```text
-MacBook Pro M4 → Minecraft + Vivecraft fork → macOS compositor bridge → Apple Vision Pro
+MacBook Pro M4 → Minecraft + Vivecraft fork → VisionCraftHost + ALVR server_core → ALVRClient on Apple Vision Pro
 ```
 
-MVP: seated play, head-tracked stereo, keyboard/mouse (optional gamepad), crosshair block interaction, 30-minute survival session without hard crash.
+MVP: seated play, head-tracked stereo, ALVR hand/gamepad-style controller input, crosshair block interaction, 30-minute survival session without hard crash.
 
 ## Non-goals (MVP)
 
-- SteamVR, ALVR, cloud GPU, OpenXR runtime
-- Motion controllers, roomscale, hand tracking
+- SteamVR, cloud GPU, OpenXR runtime
+- Roomscale locomotion and App Store shipping
 - Forge/NeoForge, Sodium/Iris, App Store shipping
 
 ## System diagram
@@ -28,28 +28,29 @@ flowchart TB
     MC --> VC --> AP --> BR
   end
   subgraph host [VisionCraftHost]
-    RIS[RemoteImmersiveSpace]
-    CL[CompositorLayer]
-    MT[Metal render loop]
     JS[JavaBridgeServer]
+    ENC[StereoFrameEncoder]
+    ALVR[alvr_server_core]
     BR <-->|JSON + RGBA frames| JS
-    JS --> MT --> CL --> RIS
+    JS --> ENC --> ALVR
   end
   subgraph avp [Apple Vision Pro]
+    CLIENT[ALVRClient]
     DISP[Immersive display]
-    RIS --> DISP
+    ALVR --> CLIENT --> DISP
   end
-  POSE[Head pose] --> JS --> BR --> AP
+  CLIENT -->|tracking/view_config/controller| ALVR --> JS --> BR --> AP
 ```
 
 ## Data flow (per frame)
 
-1. Vision Pro reports head pose → macOS compositor session.
-2. Host sends `pose` JSON → Java `ApplePoseProvider`.
-3. Vivecraft updates HMD matrices and triggers left/right render passes.
+1. ALVRClient reports head pose, view configuration, and raw controller inputs through `alvr_server_core`.
+2. Host sends `pose`, `view_config`, and `controller` JSON → Java `ApplePoseProvider` / `AppleInputProvider`.
+3. Vivecraft updates HMD matrices, controller actions, and triggers left/right render passes.
 4. Minecraft renders to eye framebuffers (OpenGL).
 5. `AppleFrameSubmitter` readbacks RGBA8 (MVP) and sends `frame` JSON + buffers.
-6. Host uploads to Metal textures and presents via Compositor Services.
+6. Host packs side-by-side RGBA, encodes Annex-B HEVC with VideoToolbox, and submits NALs to `alvr_server_core`.
+7. ALVRClient decodes and presents the stereo frame on Apple Vision Pro.
 
 ## Components
 
@@ -63,7 +64,7 @@ Fork VivecraftMod; add `org.vivecraft.client_vr.provider.apple`:
 | `ApplePoseProvider` | Polls bridge for HMD pose + recenter |
 | `AppleProjectionProvider` | Symmetric perspective per eye |
 | `AppleFrameSubmitter` | Readback + bridge send |
-| `AppleInputProvider` | Keyboard/mouse; fake controllers |
+| `AppleInputProvider` | Maps ALVR controller buttons/axes into Vivecraft `VRInputAction`s |
 | `AppleSessionState` | Maps host `session` messages |
 | `AppleVisionStereoRenderer` | `VRRenderer`; `endFrame()` submits |
 
@@ -71,12 +72,12 @@ Register `VRSettings.VRProvider.APPLE_VISION` and branch in `VRState.initializeV
 
 ### Native macOS host (`mac-host/`)
 
-SwiftUI app using `RemoteImmersiveSpace` + Compositor Services (macOS 26+):
+SwiftUI app using VideoToolbox + ALVR server_core (macOS 26+):
 
-- `CompositorRenderer` — Metal stereo compositor (M0: procedural cube)
 - `JavaBridgeServer` — TCP localhost, protocol v1
-- `FrameReceiver` — RGBA8 eye buffers → Metal textures
-- `PosePublisher` — Device pose → Java
+- `StereoFrameEncoder` — RGBA eye buffers → side-by-side Annex-B HEVC
+- `AlvrServerCoordinator` — ALVR server_core lifecycle, event polling, controller JSON, video NAL submission
+- `PosePublisher` — fallback pose publisher, suppressed while ALVR tracking is connected
 
 ### Bridge (`bridge/`)
 
@@ -104,16 +105,17 @@ Recenter increments `recenter_counter`; Java resets seated forward to Vision Pro
 |-----------|-------------|
 | `MCOpenVR` | `AppleVisionProvider` |
 | `OpenVRStereoRenderer.endFrame()` | `AppleVisionStereoRenderer.endFrame()` → bridge |
+| `VRInputAction` button/axis state | `AppleInputProvider` from `controller` JSON |
 | `VRState` provider switch | Add `APPLE_VISION` |
 | `NullVR` fake devices | Pattern for head-only + fake controllers |
 
 ## Milestones
 
-See root [README.md](../README.md). **M0 is the gate:** without `RemoteImmersiveSpace` + stereo Metal on device, do not invest in M3–M5.
+See root [README.md](../README.md). The current gate is a real ALVRClient connection showing the synthetic side-by-side test pattern upright and fused.
 
 ## Risks
 
 1. **OpenGL → Metal** — highest engineering risk; MVP uses CPU copy.
-2. **Entitlements** — verify Compositor Services signing on personal team.
+2. **Signing** — verify ALVRClient device signing/provisioning on personal team.
 3. **Vivecraft OpenVR coupling** — provider abstraction via `MCVR` / `VRRenderer`.
-4. **Frame pacing** — log render, copy, present, pose age from day one.
+4. **Frame pacing** — log render, encode, ALVR send/present, and pose age from day one.

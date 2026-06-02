@@ -9,9 +9,8 @@ import Accelerate
 ///
 /// - Channel order: Minecraft sends **RGBA** bytes; the encoder source pixel buffer is **BGRA**, so
 ///   each eye is permuted R↔B with vImage (HW-friendly, no per-pixel Swift loop).
-/// - Orientation: **no vertical flip here.** Minecraft frames are bottom-left origin (OpenGL); the
-///   companion's sample shader flips `v` (`1 - uv.y`), matching the verified macOS-host path —
-///   exactly one flip end to end.
+/// - Orientation: **no vertical flip here.** The ALVR visionOS client samples side-by-side frames
+///   directly; this encoder preserves Minecraft's submitted row order.
 /// - Low latency: real-time, no frame reordering, no B-frames. Keyframes carry their parameter
 ///   sets inline so a mid-stream viewer recovers at the next IDR.
 ///

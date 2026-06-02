@@ -54,8 +54,8 @@ final class ControlApiServer {
     }
 
     private func accept(_ connection: NWConnection) {
-        // Loopback-only: this control surface can start/stop the bridge and open the
-        // immersive space, so it must never be reachable from off-box.
+        // Loopback-only: this control surface can start/stop local services, so it must never be
+        // reachable from off-box.
         guard JavaBridgeServer.isLoopback(connection.endpoint) else {
             connection.cancel()
             return

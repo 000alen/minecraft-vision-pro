@@ -20,9 +20,9 @@ final class PosePublisher {
     private var latestPose: PoseSample?
     private let lock = NSLock()
 
-    /// When the companion (Apple Vision Pro) is connected it uplinks the authoritative on-device
-    /// head pose, so the host stops emitting its own pose to avoid two sources fighting. Guarded by
-    /// `lock` because it is toggled from the relay callback and read on the timer thread.
+    /// When ALVR is connected it uplinks the authoritative headset pose, so the host stops emitting
+    /// its fallback pose to avoid two sources fighting. Guarded by `lock` because it is toggled from
+    /// the ALVR callback and read on the timer thread.
     private var suppressLocalPose = false
     private var suppressLocalViewConfig = false
 
@@ -32,7 +32,7 @@ final class PosePublisher {
         lock.unlock()
     }
 
-    /// When the companion uplinks on-device `view_config`, silence the host's remote-display frustum.
+    /// When ALVR uplinks `view_config`, silence the host's fallback frustum.
     func setSuppressLocalViewConfig(_ suppress: Bool) {
         lock.lock()
         suppressLocalViewConfig = suppress
@@ -110,7 +110,7 @@ final class PosePublisher {
         lock.lock()
         let suppress = suppressLocalPose
         lock.unlock()
-        // The companion is the pose source; forwarding its uplink is handled by the relay.
+        // ALVR is the pose source; forwarding its uplink is handled by AlvrServerCoordinator.
         if suppress { return }
 
         let pose = currentPose()

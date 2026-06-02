@@ -1,39 +1,43 @@
 # VisionCraftHost
 
-macOS 26+ application that:
+macOS 26+ application that listens on the Java bridge (`127.0.0.1:19735`) and feeds stereo HEVC frames into ALVR's `alvr_server_core` C ABI. The headset renderer is the vendored `alvr-visionos` client in `../visionos-app`.
 
-1. **M0** — Opens `RemoteImmersiveSpace` and renders a stereoscopic Metal scene on Vision Pro.
-2. **M1** — Listens on TCP port `19735` for Java stereo frames and pose protocol v1.
+## Project Generation
 
-## Project generation (XcodeGen)
-
-The `.xcodeproj` is a **generated build artifact** (git-ignored). The source of truth is
-[`project.yml`](project.yml). After a fresh clone — or whenever you add/remove/rename files —
-regenerate it:
+The `.xcodeproj` is generated from [`project.yml`](project.yml):
 
 ```bash
-brew install xcodegen          # one-time
-../scripts/gen-projects.sh     # regenerates both mac-host and visionos-app projects
+brew install xcodegen rustup-init
+rustup-init -y
+export VISIONCRAFT_DEVELOPMENT_TEAM=<your Apple team id>
+../scripts/vc.sh bootstrap
 open VisionCraftHost.xcodeproj
 ```
 
-Sources live under `Sources/` and `Shaders/`; bundle id, deployment target (macOS 26.0), and
-hardened-runtime settings are all declared in `project.yml`. Set your **Development Team** in
-Signing & Capabilities before deploying.
+`vc.sh bootstrap` uses Rust/cargo, installs `cbindgen` if missing, builds the matching ALVR client/server artifacts, and places the server dylib/header under `Vendor/ALVRServerCore/`.
 
-## CLI build
+## CLI Build
 
 ```bash
 xcodebuild -project VisionCraftHost.xcodeproj -scheme VisionCraftHost -destination 'platform=macOS' build
 ```
 
+For compile-only checks on machines without a local signing identity:
+
+```bash
+xcodebuild -project VisionCraftHost.xcodeproj -scheme VisionCraftHost CODE_SIGNING_ALLOWED=NO build
+```
+
 ## Run
 
-1. Pair Vision Pro in Xcode → Devices.
-2. Run **VisionCraftHost** on Mac.
-3. Click **Start bridge**, then **Open immersive**.
-4. Run `./gradlew :bridge-test:run` or Minecraft with Apple provider.
+1. Run `scripts/vc.sh package-beta` from the repo root if you want a local beta bundle under `.run/beta`.
+2. Run `scripts/vc.sh host` from the repo root, or open `.run/beta/Host/VisionCraftHost.app`.
+3. Run the ALVR client from `visionos-app/ALVRClient.xcodeproj` on Apple Vision Pro.
+4. Start Minecraft with the Apple provider, or run `scripts/vc.sh sender` for the deterministic test pattern.
+5. Use `scripts/vc.sh verify` to confirm ALVR is connected and frames are advancing.
 
-## API notes
+The host window includes guided cards for setup artifacts, bridge state, headset connection, frame source, and diagnostics. If it reports missing artifacts, run:
 
-`CompositorRenderer` uses `LayerRenderer` APIs from Compositor Services. Exact method names may differ slightly in the shipping SDK — adjust `onRenderThread` / `drawable` access after the first compile on Xcode 26.
+```bash
+scripts/vc.sh bootstrap
+```

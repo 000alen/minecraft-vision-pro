@@ -1,5 +1,8 @@
 # Apple spatial rendering notes
 
+> Retired design notes: the current path uses ALVRClient + `alvr_server_core`, not the custom
+> macOS `RemoteImmersiveSpace` compositor. Keep this file as historical research context only.
+
 ## APIs (macOS 26+)
 
 | API | Role |
@@ -30,7 +33,7 @@ Apple compositor space is right-handed; meters. M0 draws:
 - **+X** red, **+Y** green, **+Z** blue axes at origin
 - Compare head yaw direction against expected forward
 
-Document findings in `mac-host/Sources/CoordinateNotes.swift` comments after first device run.
+Document findings in the current ALVR hardware validation notes if this path is revisited.
 
 ## Metal interop (M6)
 

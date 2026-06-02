@@ -2,7 +2,7 @@
 name: vision-pro-research
 description: >-
   Researches Apple Vision Pro and visionOS APIs before implementing or changing
-  companion app code, hand tracking, CompositorLayer immersive rendering, stream
+  ALVR client code, hand tracking, CompositorLayer immersive rendering, stream
   decode, or pose/hand uplink. Use when editing visionos-app/, when the user
   mentions Vision Pro, visionOS, HandTrackingProvider, ImmersiveSpace, pinch
   input, companion app, or on-device tracking — and before any Apple spatial
@@ -17,38 +17,36 @@ Complete this workflow **before** proposing code changes for Apple Vision Pro or
 
 | Question | If yes → path |
 |----------|----------------|
-| Editing `visionos-app/`? | **On-device companion** |
-| Editing `mac-host/`? | **Mac RemoteImmersiveSpace** |
-| Touching `hand` / pinch? | **Companion only** — never mac-host |
+| Editing `visionos-app/`? | **Vendored ALVR visionOS client** |
+| Editing `mac-host/`? | **Mac ALVR server_core host** |
+| Touching `hand` / pinch? | **visionOS only** — never mac-host |
 
 Read [AGENTS.md](../../../AGENTS.md) path table if unsure.
 
 ## Step 2 — Read in-repo sources
 
-**Companion (Vision Pro on-device):**
+**ALVR client (Vision Pro on-device):**
 
-- `visionos-app/Sources/VisionCraftCompanionApp.swift`
-- `visionos-app/Sources/AppModel.swift`
-- `visionos-app/Sources/CompanionRenderer.swift`
-- `visionos-app/Sources/TrackingUplink.swift`
-- `visionos-app/Sources/HandPinch.swift`
-- `visionos-app/Sources/VideoStreamDecoder.swift`
-- `visionos-app/README.md`
+- `visionos-app/ALVRClient.xcodeproj`
+- `visionos-app/ALVRClient/Shaders.metal`
+- `visionos-app/build_and_repack.sh`
+- `visionos-app/ALVR/`
 
-**Mac host (remote display):**
+**Mac host (ALVR server_core):**
 
-- `mac-host/Sources/VisionCraftImmersiveContent.swift`
-- `mac-host/Sources/CompositorRenderer.swift`
+- `mac-host/Sources/AlvrServerCoordinator.swift`
+- `mac-host/Sources/ALVRServerCoreShim.h`
+- `mac-host/Sources/ALVRServerCoreShim.c`
+- `mac-host/Sources/StereoFrameEncoder.swift`
+- `mac-host/Sources/JavaBridgeServer.swift`
 
 **Wire contracts:**
 
-- `bridge/protocol.md` — `pose`, `hand`, `view_config`, `recenter`
-- `bridge/stream-protocol.md` — Mac ↔ companion stream
+- `bridge/protocol.md` — `pose`, `controller`, `hand`, `view_config`, `recenter`
 
 **Curated links:**
 
 - `docs/vision-pro-references.md`
-- `docs/apple-spatial-rendering-notes.md`
 
 Search the repo for existing usage of the API you plan to change (`grep` / semantic search).
 
@@ -64,7 +62,7 @@ Example queries:
 - `ImmersiveSpace CompositorLayer LayerRenderer Metal render loop visionOS`
 - `HandTrackingProvider ARKitSession requestAuthorization hand tracking`
 - `WorldTrackingProvider queryDeviceAnchor device transform`
-- `RemoteImmersiveSpace macOS compositor remote device`
+- `VideoToolbox HEVC parameter sets CMSampleBuffer`
 
 Also useful: `/websites/developer_apple_technologyoverviews` for conceptual spatial computing docs.
 
@@ -81,7 +79,7 @@ Provide a short block:
 
 ```markdown
 ## Research notes
-- Path: companion | mac-host
+- Path: alvr-client | mac-host
 - In-repo precedent: <file:area>
 - Apple docs: <title + URL>
 - API/lifecycle: <1–3 sentences>
@@ -97,7 +95,7 @@ Provide a short block:
 ## Common mistakes to avoid
 
 - `HandTrackingProvider` on macOS
-- `RemoteImmersiveSpace` in the companion app
+- Reintroducing the retired RemoteImmersiveSpace/custom relay path without explicit direction
 - Enabling foveation on blitted game frames
 - Blocking the compositor thread on main-actor UI work
 - Changing `hand` / `pose` JSON without updating `bridge/protocol.md` and Java consumers

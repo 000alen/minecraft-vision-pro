@@ -1,41 +1,71 @@
 import Foundation
+import AppKit
 import Observation
-
-#if canImport(ARKit)
-import ARKit
-#endif
-#if canImport(CompositorServices)
-import CompositorServices
-#endif
 
 @MainActor
 @Observable
 final class VisionCraftAppModel {
-    var immersiveSpaceOpen = false
     var sessionState: BridgeSessionState = .closed
     var lastFrameId: UInt64 = 0
     var framesReceived: UInt64 = 0
     var bridgePort: Int = 19735
     var controlPort: Int = 19734
-    var relayPort: Int = Int(StreamProtocol.defaultPort)
-    var relayToken: String = ""
     var diagnosticText: String = "Idle"
     var autoStartBridge = true
-    var autoStartRelay = true
-    var autoOpenImmersive = false
-    var supportsRemoteScenes = false
-    var remoteDeviceIdentifierAvailable = false
-    var arTrackingState = "unavailable"
-    var relayRunning = false
-    var relayViewerConnected = false
+    var autoStartAlvr = true
+    var bridgeRunning = false
+    var alvrRunning = false
+    var alvrClientConnected = false
+    var alvrFramesSent: UInt64 = 0
+    var alvrTargetEyeWidth = 0
+    var alvrTargetEyeHeight = 0
     var framesEncoded: UInt64 = 0
-    private var remoteARKitSessionStarted = false
 
     let bridgeServer = JavaBridgeServer()
     let controlApiServer = ControlApiServer()
-    let compositor = CompositorRenderer()
     let posePublisher = PosePublisher()
-    let relay: StreamRelayCoordinator
+    let alvr = AlvrServerCoordinator()
+
+    var pipelineReady: Bool {
+        bridgeRunning && alvrRunning && alvrClientConnected && framesEncoded > 0
+    }
+
+    var setupArtifactsReady: Bool {
+        let root = Self.repoRootPath()
+        return FileManager.default.fileExists(
+            atPath: "\(root)/mac-host/Vendor/ALVRServerCore/libalvr_server_core.dylib"
+        ) && FileManager.default.fileExists(
+            atPath: "\(root)/visionos-app/ALVRClient/ALVRClientCore.xcframework"
+        )
+    }
+
+    var nextStepTitle: String {
+        if !setupArtifactsReady { return "Run beta preflight" }
+        if !bridgeRunning { return "Start the Java bridge" }
+        if !alvrRunning { return "Start ALVR server_core" }
+        if !alvrClientConnected { return "Run ALVRClient on Apple Vision Pro" }
+        if framesEncoded == 0 { return "Start Minecraft or the test sender" }
+        return "Stream is live"
+    }
+
+    var nextStepDetail: String {
+        if !setupArtifactsReady {
+            return "Run scripts/vc.sh bootstrap to generate ALVR artifacts and projects."
+        }
+        if !bridgeRunning {
+            return "The bridge listens on 127.0.0.1:\(bridgePort) for Minecraft or the test sender."
+        }
+        if !alvrRunning {
+            return "ALVR server_core advertises the headset stream and waits for the visionOS client."
+        }
+        if !alvrClientConnected {
+            return "On the headset, run ALVRClient from Xcode or your beta install, then allow permissions."
+        }
+        if framesEncoded == 0 {
+            return "Run scripts/vc.sh sender for a test pattern, or scripts/vc.sh mc and press F7 in Minecraft."
+        }
+        return "Use scripts/vc.sh verify if you want a terminal health check."
+    }
 
     init(processInfo: ProcessInfo = .processInfo) {
         let environment = processInfo.environment
@@ -55,34 +85,13 @@ final class VisionCraftAppModel {
         ) {
             controlPort = configuredControlPort
         }
-        var resolvedRelayPort = Int(StreamProtocol.defaultPort) // mirrors the `relayPort` default below
-        if let configuredRelayPort = Self.intValue(
-            for: "VISIONCRAFT_RELAY_PORT",
-            arguments: arguments,
-            environment: environment
-        ) {
-            resolvedRelayPort = configuredRelayPort
-        }
-        let resolvedRelayToken = environment["VISIONCRAFT_RELAY_TOKEN"] ?? ""
-
-        // Initialize `relay` before any `self.` property reads (all stored properties must be set
-        // before `self` is usable in init).
-        relayPort = resolvedRelayPort
-        relayToken = resolvedRelayToken
-        relay = StreamRelayCoordinator(port: UInt16(clamping: resolvedRelayPort), token: resolvedRelayToken)
-
         autoStartBridge = !Self.boolValue(
             for: "VISIONCRAFT_NO_AUTO_START_BRIDGE",
             arguments: arguments,
             environment: environment
         )
-        autoStartRelay = !Self.boolValue(
-            for: "VISIONCRAFT_NO_AUTO_START_RELAY",
-            arguments: arguments,
-            environment: environment
-        )
-        autoOpenImmersive = Self.boolValue(
-            for: "VISIONCRAFT_AUTO_OPEN_IMMERSIVE",
+        autoStartAlvr = !Self.boolValue(
+            for: "VISIONCRAFT_NO_AUTO_START_ALVR",
             arguments: arguments,
             environment: environment
         )
@@ -101,150 +110,74 @@ final class VisionCraftAppModel {
 
     func startBridge() {
         bridgeServer.appModel = self
-        bridgeServer.compositor = compositor
         bridgeServer.posePublisher = posePublisher
-        bridgeServer.relay = relay
+        bridgeServer.alvr = alvr
         do {
             try bridgeServer.start(port: bridgePort)
+            bridgeRunning = true
             diagnosticText = "Bridge listening on :\(bridgePort)"
-            if immersiveSpaceOpen {
-                bridgeServer.broadcastSession(.ready)
-            }
         } catch {
+            bridgeRunning = false
             diagnosticText = "Bridge failed: \(error.localizedDescription)"
         }
     }
 
     func stopBridge() {
         bridgeServer.stop()
+        bridgeRunning = false
         diagnosticText = "Bridge stopped"
     }
 
-    func startRelay() {
-        // Forward the companion's on-device pose/hand/view_config straight into the loopback bridge.
-        relay.onUplinkLine = { [weak self] line in
+    func startAlvr(enableSyntheticFrames: Bool = false) {
+        alvr.onUplinkLine = { [weak self] line in
             self?.bridgeServer.forwardUplink(line)
         }
-        relay.onStatus = { [weak self] status in
+        alvr.onStatus = { [weak self] status in
             Task { @MainActor in self?.diagnosticText = status }
         }
-        relay.onViewerChange = { [weak self] connected in
+        alvr.onClientConnectionChange = { [weak self] connected in
             Task { @MainActor in
                 guard let self else { return }
-                self.relayViewerConnected = connected
-                // While the headset is the pose source, silence the host's local pose emitter.
+                self.alvrClientConnected = connected
                 self.posePublisher.setSuppressLocalPose(connected)
                 self.posePublisher.setSuppressLocalViewConfig(connected)
-                // In the companion (relay) architecture the Mac never opens a local
-                // immersive space, so the companion connecting is what makes a headset
-                // "present" to receive frames. Signal the Java bridge accordingly, or
-                // Minecraft's AppleNativeBridge refuses to submit frames ("Session not
-                // ready"). When it disconnects, fall back to the local immersive state.
-                let restingState: BridgeSessionState = self.immersiveSpaceOpen ? .ready : .closed
-                self.sessionState = connected ? .ready : restingState
-                self.bridgeServer.broadcastSession(connected ? .ready : restingState)
-                self.diagnosticText = connected ? "Companion connected" : "Companion disconnected"
+                self.sessionState = connected ? .ready : .closed
+                self.bridgeServer.broadcastSession(connected ? .ready : .closed)
+                self.diagnosticText = connected ? "ALVR headset connected" : "ALVR headset disconnected"
             }
         }
-        do {
-            try relay.start()
-            relayRunning = true
-            diagnosticText = "Relay listening on :\(relayPort) (Bonjour _visioncraft-stream._tcp)"
-        } catch {
-            relayRunning = false
-            diagnosticText = "Relay failed: \(error.localizedDescription)"
-        }
+        alvr.start(enableSyntheticFrames: enableSyntheticFrames)
+        alvrRunning = true
+        refreshAlvrStats()
     }
 
-    func stopRelay() {
-        relay.stop()
-        relayRunning = false
-        relayViewerConnected = false
+    func stopAlvr() {
+        alvr.stop()
+        alvrRunning = false
+        alvrClientConnected = false
         posePublisher.setSuppressLocalPose(false)
         posePublisher.setSuppressLocalViewConfig(false)
-        diagnosticText = "Relay stopped"
+        sessionState = .closed
+        bridgeServer.broadcastSession(sessionState)
+        diagnosticText = "ALVR stopped"
     }
 
-    /// Pull the relay's live counters onto the main-actor observable state (called from the UI tick).
-    func refreshRelayStats() {
-        framesEncoded = relay.framesEncoded
-        relayViewerConnected = relay.viewerConnected
+    func refreshAlvrStats() {
+        let snapshot = alvr.snapshot()
+        alvrRunning = snapshot.running
+        alvrClientConnected = snapshot.clientConnected
+        framesEncoded = snapshot.framesEncoded
+        alvrFramesSent = snapshot.framesSent
+        alvrTargetEyeWidth = snapshot.targetEyeWidth
+        alvrTargetEyeHeight = snapshot.targetEyeHeight
     }
-
-    func onImmersiveSpaceOpened() {
-        immersiveSpaceOpen = true
-        sessionState = .ready
-        bridgeServer.broadcastSession(.ready)
-        diagnosticText = "Immersive space active"
-    }
-
-    func onImmersiveSpaceClosed() {
-        immersiveSpaceOpen = false
-        remoteARKitSessionStarted = false
-        sessionState = relayViewerConnected ? .ready : .closed
-        bridgeServer.broadcastSession(relayViewerConnected ? .ready : .closed)
-        compositor.detach()
-        diagnosticText = relayViewerConnected
-            ? "Immersive space closed (companion still connected)"
-            : "Immersive space closed"
-    }
-
-    func setSupportsRemoteScenes(_ supported: Bool) {
-        supportsRemoteScenes = supported
-    }
-
-    func setRemoteDeviceIdentifierAvailable(_ available: Bool) {
-        remoteDeviceIdentifierAvailable = available
-    }
-
-    func setARTrackingState(_ state: String) {
-        arTrackingState = state
-    }
-
-    #if canImport(CompositorServices)
-    /// Start (once) or refresh the remote ARKit session + compositor for `RemoteImmersiveSpace`.
-    @available(macOS 26.0, *)
-    func startRemoteImmersiveSession(
-        layer: LayerRenderer,
-        session: ARKitSession,
-        worldTrackingProvider: WorldTrackingProvider
-    ) {
-        if remoteARKitSessionStarted {
-            compositor.attach(
-                layer: layer,
-                arKitSession: session,
-                worldTrackingProvider: worldTrackingProvider,
-                posePublisher: posePublisher
-            )
-            return
-        }
-        remoteARKitSessionStarted = true
-        Task(priority: .high) {
-            do {
-                try await session.run([worldTrackingProvider])
-                await MainActor.run {
-                    self.setARTrackingState(worldTrackingProvider.state.description)
-                }
-                self.compositor.attach(
-                    layer: layer,
-                    arKitSession: session,
-                    worldTrackingProvider: worldTrackingProvider,
-                    posePublisher: self.posePublisher
-                )
-            } catch {
-                await MainActor.run {
-                    self.remoteARKitSessionStarted = false
-                    self.setARTrackingState("failed: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-    #endif
 
     private func handleControlRequest(_ request: ControlApiServer.Request) async -> ControlApiServer.Response {
         switch (request.method, request.path) {
         case ("GET", "/health"):
             return .json(#"{"ok":true}"#)
+        case ("GET", "/ready"):
+            return .json(status: pipelineReady ? 200 : 503, statusJson())
         case ("GET", "/status"):
             return .json(statusJson())
         case ("POST", "/bridge/start"):
@@ -256,21 +189,12 @@ final class VisionCraftAppModel {
         case ("POST", "/bridge/stop"):
             stopBridge()
             return .json(statusJson())
-        case ("POST", "/relay/start"):
-            if let port = request.query["port"].flatMap(Int.init) {
-                relayPort = port
-            }
-            startRelay()
+        case ("POST", "/alvr/start"):
+            let synthetic = request.query["synthetic"].map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false
+            startAlvr(enableSyntheticFrames: synthetic)
             return .json(statusJson())
-        case ("POST", "/relay/stop"):
-            stopRelay()
-            return .json(statusJson())
-        case ("POST", "/immersive/open"):
-            diagnosticText = "Control API requested immersive open"
-            NotificationCenter.default.post(name: .visionCraftOpenImmersiveRequest, object: nil)
-            return .json(status: 202, #"{"requested":true}"#)
-        case ("POST", "/immersive/closed"):
-            onImmersiveSpaceClosed()
+        case ("POST", "/alvr/stop"):
+            stopAlvr()
             return .json(statusJson())
         default:
             return .json(status: 404, #"{"error":"not_found"}"#)
@@ -278,10 +202,25 @@ final class VisionCraftAppModel {
     }
 
     private func statusJson() -> String {
-        refreshRelayStats()
+        refreshAlvrStats()
         return """
-        {"ok":true,"bridge_port":\(bridgePort),"control_port":\(controlPort),"relay_port":\(relayPort),"relay_running":\(relayRunning),"relay_viewer_connected":\(relayViewerConnected),"frames_encoded":\(framesEncoded),"supports_remote_scenes":\(supportsRemoteScenes),"remote_device_identifier_available":\(remoteDeviceIdentifierAvailable),"ar_tracking_state":"\(Self.escapeJson(arTrackingState))","immersive_open":\(immersiveSpaceOpen),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),\(compositor.statusJsonFragment()),"diagnostic":"\(Self.escapeJson(diagnosticText))"}
+        {"ok":true,"pipeline_ready":\(pipelineReady),"bridge_running":\(bridgeRunning),"bridge_port":\(bridgePort),"control_port":\(controlPort),"alvr_running":\(alvrRunning),"alvr_client_connected":\(alvrClientConnected),"alvr_frames_sent":\(alvrFramesSent),"alvr_target_eye_width":\(alvrTargetEyeWidth),"alvr_target_eye_height":\(alvrTargetEyeHeight),"frames_encoded":\(framesEncoded),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),"diagnostic":"\(Self.escapeJson(diagnosticText))","next_step":"\(Self.escapeJson(nextStepTitle))"}
         """
+    }
+
+    func copyVerifyCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("scripts/vc.sh verify", forType: .string)
+        diagnosticText = "Copied verification command"
+    }
+
+    func openRunbook() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: "\(Self.repoRootPath())/docs/runbook.md"))
+    }
+
+    func revealBetaBundle() {
+        let url = URL(fileURLWithPath: "\(Self.repoRootPath())/.run/beta")
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
 
@@ -289,15 +228,18 @@ enum BridgeSessionState: String {
     case ready, paused, lost, closed
 }
 
-enum VisionCraftImmersiveSpace {
-    static let id = "visioncraft.immersive.main"
-}
-
-extension Notification.Name {
-    static let visionCraftOpenImmersiveRequest = Notification.Name("VisionCraftOpenImmersiveRequest")
-}
-
 private extension VisionCraftAppModel {
+    static func repoRootPath() -> String {
+        if let env = ProcessInfo.processInfo.environment["VISIONCRAFT_REPO_ROOT"], !env.isEmpty {
+            return env
+        }
+        let bundlePath = Bundle.main.bundleURL.path
+        if let range = bundlePath.range(of: "/mac-host/build/") {
+            return String(bundlePath[..<range.lowerBound])
+        }
+        return FileManager.default.currentDirectoryPath
+    }
+
     static func escapeJson(_ value: String) -> String {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")

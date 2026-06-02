@@ -47,7 +47,7 @@ CPU readback dominates until IOSurface path (M6).
 ## Diagnostics
 
 - `bridge-test` prints rolling avg/max per stage.
-- Host: Xcode GPU frame capture + signposts in `CompositorRenderer`.
+- Host: VideoToolbox encode timing + signposts around `AlvrServerCoordinator` NAL submission.
 - Java: `AppleFrameSubmitter` logs dropped frames when `frame_id` skips.
 
 ## Comfort interaction

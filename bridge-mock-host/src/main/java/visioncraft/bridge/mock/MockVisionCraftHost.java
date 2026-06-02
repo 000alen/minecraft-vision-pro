@@ -94,6 +94,7 @@ public final class MockVisionCraftHost implements AutoCloseable {
             sendJson(out, sessionJson("ready"));
             sendJson(out, VIEW_CONFIG_JSON);
             sendJson(out, HAND_JSON);
+            sendJson(out, controllerJson());
             AtomicInteger recenterCounter = new AtomicInteger(0);
             AtomicBoolean poseRunning = new AtomicBoolean(true);
             Thread poseThread = new Thread(() -> poseLoop(out, recenterCounter, poseRunning), "mock-pose");
@@ -240,6 +241,20 @@ public final class MockVisionCraftHost implements AutoCloseable {
             "{\"chirality\":\"right\",\"tracked\":true,\"position_m\":[0.2,1.3,-0.3]," +
             "\"orientation_xyzw\":[0.0,0.0,0.0,1.0],\"pinch\":0.92}" +
             "]}";
+
+    private static String controllerJson() {
+        long timestampNs = System.currentTimeMillis() * 1_000_000L;
+        return "{\"type\":\"controller\",\"version\":1,\"timestamp_ns\":" + timestampNs + ",\"controllers\":[" +
+            "{\"hand\":\"left\",\"tracked\":true,\"position_m\":[-0.2,1.3,-0.3]," +
+            "\"orientation_xyzw\":[0.0,0.0,0.0,1.0]," +
+            "\"buttons\":{\"x\":true,\"trigger_click\":false}," +
+            "\"axes\":{\"thumbstick_x\":0.25,\"thumbstick_y\":-0.5,\"trigger\":0.1}}," +
+            "{\"hand\":\"right\",\"tracked\":true,\"position_m\":[0.2,1.3,-0.3]," +
+            "\"orientation_xyzw\":[0.0,0.0,0.0,1.0]," +
+            "\"buttons\":{\"a\":true,\"trigger_click\":true}," +
+            "\"axes\":{\"thumbstick_x\":0.75,\"thumbstick_y\":0.0,\"trigger\":1.0}}" +
+            "]}";
+    }
 
     public MockHostStats getStats() {
         return stats;

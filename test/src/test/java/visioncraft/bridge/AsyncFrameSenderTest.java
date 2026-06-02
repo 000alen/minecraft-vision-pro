@@ -27,7 +27,7 @@ class AsyncFrameSenderTest {
         })) {
             for (long i = 1; i <= 5; i++) {
                 AsyncFrameSender.Frame f = sender.beginFrame(2, 2);
-                sender.commitFrame(f, i, i * 10L, 0.05f, 512f);
+                sender.commitFrame(f, i, i * 10L, 0.05f, 512f, null);
                 // Wait for this frame to land before producing the next so none are dropped.
                 awaitCount(sent, (int) i);
             }
@@ -60,13 +60,13 @@ class AsyncFrameSenderTest {
         });
 
         // Frame 1 is picked up and blocks inside the sink.
-        sender.commitFrame(sender.beginFrame(2, 2), 1L, 0L, 0.05f, 512f);
+        sender.commitFrame(sender.beginFrame(2, 2), 1L, 0L, 0.05f, 512f, null);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS), "first frame entered the sink");
 
         // While the sender is blocked, queue two more: frame 2 then frame 3.
         // Latest-wins must drop frame 2 and keep frame 3.
-        sender.commitFrame(sender.beginFrame(2, 2), 2L, 0L, 0.05f, 512f);
-        sender.commitFrame(sender.beginFrame(2, 2), 3L, 0L, 0.05f, 512f);
+        sender.commitFrame(sender.beginFrame(2, 2), 2L, 0L, 0.05f, 512f, null);
+        sender.commitFrame(sender.beginFrame(2, 2), 3L, 0L, 0.05f, 512f, null);
 
         releaseFirst.countDown();
         assertTrue(sentTwo.await(2, TimeUnit.SECONDS), "two frames delivered");
@@ -94,7 +94,7 @@ class AsyncFrameSenderTest {
             }
         });
 
-        sender.commitFrame(sender.beginFrame(4, 4), 1L, 0L, 0.05f, 512f);
+        sender.commitFrame(sender.beginFrame(4, 4), 1L, 0L, 0.05f, 512f, null);
         assertTrue(oneStarted.await(2, TimeUnit.SECONDS));
 
         for (long i = 2; i <= 1000; i++) {
@@ -102,7 +102,7 @@ class AsyncFrameSenderTest {
             assertNotNull(f, "pool always serves the render thread");
             assertEquals(4 * 4 * 4, f.left().length);
             assertEquals(4 * 4 * 4, f.right().length);
-            sender.commitFrame(f, i, 0L, 0.05f, 512f);
+            sender.commitFrame(f, i, 0L, 0.05f, 512f, null);
         }
         blocked.set(false);
         release.countDown();
@@ -134,7 +134,7 @@ class AsyncFrameSenderTest {
         AsyncFrameSender.Frame f = sender.beginFrame(2, 2);
         sender.close();
         // Must be a no-op, not an exception or leak.
-        sender.commitFrame(f, 1L, 0L, 0.05f, 512f);
+        sender.commitFrame(f, 1L, 0L, 0.05f, 512f, null);
         assertFalse(sender.sentFrames() > 1);
     }
 

@@ -1,6 +1,22 @@
 # VisionCraft status
 
-Last updated: 2026-05-31
+Last updated: 2026-06-01
+
+> Current runtime path: `VisionCraftHost` + ALVR `server_core` + vendored `ALVRClient`.
+> Older notes about RemoteImmersiveSpace / custom companion relay are historical only.
+
+## Current beta flow
+
+```bash
+scripts/vc.sh bootstrap
+scripts/vc.sh package-beta
+scripts/vc.sh host --rebuild
+scripts/vc.sh alvr-client
+scripts/vc.sh sender   # or scripts/vc.sh mc, then press F7
+scripts/vc.sh verify
+```
+
+Current OOTB work focuses on a packaged local beta: self-checking scripts, a guided Mac host UI, VisionCraft-specific headset onboarding, and explicit signing/pairing recovery. AVP install still requires Apple signing/provisioning through Xcode or TestFlight.
 
 ## Milestones
 
@@ -9,9 +25,9 @@ Last updated: 2026-05-31
 | **M0** | RemoteImmersiveSpace + Metal stereo on Vision Pro | **Visual + head tracking passed**; 10-minute comfort run deferred |
 | **M1** | Java ↔ native bridge (test patterns + pose) | **Automated in CI** via `MockVisionCraftHost`; visual check still needs real host |
 | **M2** | AppleVisionProvider, no SteamVR path | **Integrated** in vendored Vivecraft, default plugin |
-| **M3** | Stereo main menu on headset | Blocked on M0 + M1 on device |
-| **M4** | In-world head-tracked view | Provider + HMD aim wired — needs device QA |
-| **M5** | 30-minute survival MVP | Not validated |
+| **M3** | Stereo main menu on headset | ALVR path wired; hardware validation pending |
+| **M4** | In-world head-tracked view | ALVR pose bridge wired; hardware validation pending |
+| **M5** | 30-minute survival MVP | Controller input wired; hardware validation pending |
 | **M6** | IOSurface / no CPU readback | Stub only (`MetalInterop.mm`) |
 
 ## What works in repo today
@@ -24,20 +40,16 @@ Last updated: 2026-05-31
 - Comfort defaults (seated, HMD aim, fake controllers for crosshair)
 - OpenVR `create()` skip on Apple Vision path
 
-## Hardware validation checklist (you)
+## Hardware validation checklist
 
 ```bash
-# Mac
-open mac-host/VisionCraftHost.xcodeproj
-# Run → Start bridge → Open immersive
-
-# Same Mac terminal
-./gradlew :bridge-test:run
-
-# Minecraft
-cd minecraft/VivecraftMod && ./gradlew :fabric:build
-# Install JAR, launch Fabric, enable VR
+scripts/vc.sh host --rebuild
+scripts/vc.sh alvr-client
+scripts/vc.sh sender
+scripts/vc.sh verify
 ```
+
+Then validate Minecraft with `scripts/vc.sh mc`, press F7, and run the controller checklist in `docs/runbook.md`.
 
 ## Latest M0 preflight
 

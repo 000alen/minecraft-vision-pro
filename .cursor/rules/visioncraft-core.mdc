@@ -5,14 +5,14 @@ alwaysApply: true
 
 # VisionCraft core
 
-This repo streams Minecraft stereo to Apple Vision Pro via a Mac host and/or a native visionOS companion.
+This repo streams Minecraft stereo to Apple Vision Pro via a Mac host linked against ALVR `server_core` and the vendored `alvr-visionos` client.
 
 Before any Apple-platform change:
 
-1. Read [AGENTS.md](../../AGENTS.md) and identify **mac-host** vs **visionos-app**.
+1. Read [AGENTS.md](../../AGENTS.md) and identify whether you are editing the Mac ALVR host or the vendored ALVR visionOS client.
 2. Read the golden files listed there for the path you are editing.
-3. Cross-check [bridge/protocol.md](../../bridge/protocol.md) when touching pose, hand, frames, or view config.
+3. Cross-check [bridge/protocol.md](../../bridge/protocol.md) when touching pose, controller, hand, frames, or view config.
 
-Do not guess Compositor Services, ARKit, or VideoToolbox APIs. Use Context7 (`/websites/developer_apple`) or official documentation URLs.
+Do not guess ALVR C ABI, VideoToolbox, Compositor Services, or ARKit APIs. Use the generated ALVR header, Context7 (`/websites/developer_apple`), or official documentation URLs.
 
 Platform targets: macOS 26+, visionOS 26+, Xcode 26+.
