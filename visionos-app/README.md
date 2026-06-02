@@ -62,21 +62,36 @@ See `../bridge/stream-protocol.md` for the wire format.
 | `Resources/Info.plist` | Usage strings + Bonjour service |
 | `Resources/VisionCraftCompanion.entitlements` | (no special capability needed) |
 
-## Create the Xcode target
+## Project generation (XcodeGen)
 
-This repo keeps sources flat (like `mac-host/`); create the app target in Xcode on the Mac:
+The `.xcodeproj` is a **generated build artifact** (git-ignored). The source of truth is
+[`project.yml`](project.yml). Generate it after a fresh clone — or whenever you add/remove/rename
+files:
 
-1. **File → New → Project → visionOS → App.** Product name `VisionCraftCompanion`,
-   interface **SwiftUI**, language **Swift**. Set deployment target to **visionOS 2.0+**.
-2. Delete the template `ContentView`/`App` files; **add** all of `Sources/*.swift` and
-   `Shaders/Composite.metal` to the target.
-3. Set the target's **Info.plist** to `Resources/Info.plist` (or merge its keys), and the
-   **Code Signing Entitlements** to `Resources/VisionCraftCompanion.entitlements`.
-4. Signing & Capabilities: select your team. No extra capability is required — hand/world tracking
-   are gated by the Info.plist usage strings; LAN networking by `NSLocalNetworkUsageDescription`.
-5. If the new target defaults to the Swift 6 language mode and the `CompositorLayer` closure
-   produces concurrency errors, set **Swift Language Version → Swift 5** for the target (matches
-   Apple's Metal-immersive sample structure).
+```bash
+brew install xcodegen          # one-time
+../scripts/gen-projects.sh     # regenerates both mac-host and visionos-app projects
+open VisionCraftCompanion.xcodeproj
+```
+
+`project.yml` already wires everything the manual setup used to require:
+
+- **Sources** — `Sources/*.swift` + `Shaders/Composite.metal`.
+- **Info.plist** — `Resources/Info.plist` (ARKit usage strings + Bonjour) is set as `INFOPLIST_FILE`
+  and merged with the standard generated keys, so it stays the single source of truth.
+- **Entitlements** — `Resources/VisionCraftCompanion.entitlements`.
+- **Deployment target** — visionOS 26.0 (the renderer uses the modern CompositorServices
+  `queryDrawables()`/`startSubmission()` frame API).
+- **Swift language mode** — Swift 5 (the `CompositorLayer` render closure runs off the main actor;
+  Swift 6 strict concurrency flags the `AppModel` hand-offs, matching Apple's Metal-immersive sample).
+
+The only thing left to you: select your **Development Team** under Signing & Capabilities. No extra
+capability is required — hand/world tracking are gated by the Info.plist usage strings, LAN
+networking by `NSLocalNetworkUsageDescription`.
+
+> **Simulator runtime:** building/running on the simulator needs the visionOS runtime that matches
+> your Xcode (e.g. `xcodebuild -downloadPlatform visionOS`). A mismatched/older simulator runtime is
+> ignored by a newer Xcode.
 
 ## Deploy to the device
 

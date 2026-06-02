@@ -14,12 +14,13 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class FakeStereoFrameSender {
     private static final int WIDTH = 512;
     private static final int HEIGHT = 512;
-    private static final int FRAME_COUNT = 300;
     private static final long FRAME_INTERVAL_MS = 16;
 
     public static void main(String[] args) throws Exception {
         String host = args.length > 0 ? args[0] : AppleNativeBridge.DEFAULT_HOST;
         int port = args.length > 1 ? Integer.parseInt(args[1]) : AppleNativeBridge.DEFAULT_PORT;
+        // 3rd arg = frame count; <= 0 (default) streams continuously until Ctrl-C.
+        long maxFrames = args.length > 2 ? Long.parseLong(args[2]) : 0;
 
         System.out.println("VisionCraft bridge-test → " + host + ":" + port);
         try (AppleNativeBridge bridge = new AppleNativeBridge(host, port)) {
@@ -36,7 +37,7 @@ public final class FakeStereoFrameSender {
 
             long frameId = 0;
             long start = System.nanoTime();
-            for (int i = 0; i < FRAME_COUNT; i++) {
+            for (int i = 0; maxFrames <= 0 || i < maxFrames; i++) {
                 if (bridge.getSessionState() != AppleNativeBridge.SessionState.READY) {
                     Thread.sleep(50);
                     continue;
@@ -50,7 +51,8 @@ public final class FakeStereoFrameSender {
                     t0,
                     WIDTH, HEIGHT, left,
                     WIDTH, HEIGHT, right,
-                    0.05f, 512f
+                    0.05f, 512f,
+                    null
                 ));
                 long sendMs = (System.nanoTime() - t0) / 1_000_000;
                 if (frameId % 30 == 0) {

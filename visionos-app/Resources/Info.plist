@@ -2,6 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- The companion shows a launch WindowGroup AND a full ImmersiveSpace, so two scenes can be
+	     active at once. visionOS refuses openImmersiveSpace unless the app opts into multiple
+	     scenes here (the generated plist otherwise defaults this to NO). -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
+
 	<!-- ARKit on-device tracking. Hand tracking is the whole point of the companion; world
 	     sensing backs the device (head) anchor. Both are gated by these usage strings. -->
 	<key>NSHandsTrackingUsageDescription</key>

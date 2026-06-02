@@ -1,0 +1,26 @@
+---
+description: macOS RemoteImmersiveSpace host — head pose only, no visionOS hand APIs
+globs: mac-host/**/*
+alwaysApply: false
+---
+
+# macOS host (RemoteImmersiveSpace)
+
+Applies to `mac-host/`. The Mac renders to a **paired Vision Pro** via `RemoteImmersiveSpace`; Java connects over the loopback bridge.
+
+## Path constraints
+
+- Use `RemoteImmersiveSpace` + remote `ARKitSession(device:)` — not `ImmersiveSpace`.
+- **Do not** add `HandTrackingProvider` — unavailable on macOS. Head pose only via `WorldTrackingProvider`.
+- Pinch/hand input comes from the **visionOS companion** uplink, not this target. See `bridge/protocol.md`.
+
+## Required research (before writing code)
+
+1. Read in-repo: `VisionCraftImmersiveContent.swift`, `CompositorRenderer.swift`, `JavaBridgeServer.swift`.
+2. Read [docs/apple-spatial-rendering-notes.md](../../docs/apple-spatial-rendering-notes.md).
+3. Context7: `/websites/developer_apple` — query `RemoteImmersiveSpace`, `CompositorLayer`, remote device ARKit.
+4. Output **research notes** before proposing a diff.
+
+## Relay mode
+
+When the companion connects, `StreamRelayCoordinator` encodes frames and forwards uplink pose/hand — suppress duplicate local pose. Read relay files before changing stream or bridge interaction.

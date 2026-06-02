@@ -5,20 +5,27 @@ macOS 26+ application that:
 1. **M0** — Opens `RemoteImmersiveSpace` and renders a stereoscopic Metal scene on Vision Pro.
 2. **M1** — Listens on TCP port `19735` for Java stereo frames and pose protocol v1.
 
-## Open in Xcode
+## Project generation (XcodeGen)
+
+The `.xcodeproj` is a **generated build artifact** (git-ignored). The source of truth is
+[`project.yml`](project.yml). After a fresh clone — or whenever you add/remove/rename files —
+regenerate it:
 
 ```bash
+brew install xcodegen          # one-time
+../scripts/gen-projects.sh     # regenerates both mac-host and visionos-app projects
 open VisionCraftHost.xcodeproj
 ```
 
-Create the Xcode project on a Mac if the generated project is missing targets — source files are under `Sources/` and `Shaders/`.
+Sources live under `Sources/` and `Shaders/`; bundle id, deployment target (macOS 26.0), and
+hardened-runtime settings are all declared in `project.yml`. Set your **Development Team** in
+Signing & Capabilities before deploying.
 
-### Manual Xcode setup
+## CLI build
 
-1. New **App** → SwiftUI → macOS 26 deployment target.
-2. Add **Compositor Services** capability / framework.
-3. Add all `Sources/*.swift` and `Shaders/Composite.metal`.
-4. Enable **Remote Immersive Space** in Signing & Capabilities (verify exact entitlement name in Xcode 26).
+```bash
+xcodebuild -project VisionCraftHost.xcodeproj -scheme VisionCraftHost -destination 'platform=macOS' build
+```
 
 ## Run
 

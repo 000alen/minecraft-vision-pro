@@ -35,6 +35,7 @@ final class AppModel {
     private var renderer: CompanionRenderer?
     private var uplink: TrackingUplink?
     private var streamClient: StreamClient?
+    private(set) var immersiveSessionActive = false
 
     // MARK: - UI state (always written on main)
 
@@ -72,42 +73,70 @@ final class AppModel {
     /// Invoked from the `CompositorLayer` content closure (off the main actor) when the immersive
     /// space opens. Wires the network client, tracking uplink, and renderer, then starts them.
     func startImmersive(layerRenderer: LayerRenderer) {
-        let uplink = TrackingUplink(worldTracking: worldTracking, handTracking: handTracking)
+        guard !immersiveSessionActive else { return }
+        immersiveSessionActive = true
+
+        let handEnabled = handTrackingAuthorized
+        let uplink = TrackingUplink(
+            worldTracking: worldTracking,
+            handTracking: handTracking,
+            handTrackingEnabled: handEnabled
+        )
         self.uplink = uplink
 
         let client = StreamClient(
             manualHost: manualHost.isEmpty ? nil : manualHost,
-            token: pairingToken
+            token: pairingToken,
+            metalDevice: layerRenderer.device
         )
         client.onPhaseChange = { [weak self] phase, detail in
             self?.setPhase(phase, detail: detail)
         }
         uplink.sendLine = { [weak client] line in client?.sendUplink(line) }
+        client.onDownlinkLine = { [weak uplink] line in uplink?.handleDownlinkLine(line) }
         self.streamClient = client
 
+        var decodedFrameCount: UInt64 = 0
         let renderer = CompanionRenderer(
             layerRenderer: layerRenderer,
             worldTracking: worldTracking,
             videoSource: client.videoSource,
-            onFrameDecoded: { [weak self] count in
-                self?.mainAsync { self?.framesDecoded = count }
+            trackingUplink: uplink,
+            onFrameDecoded: { [weak self] frameID in
+                self?.mainAsync {
+                    guard let self else { return }
+                    if frameID > 0 {
+                        decodedFrameCount += 1
+                        if self.phase == .immersiveNoVideo {
+                            self.phase = .streaming
+                        }
+                        self.framesDecoded = decodedFrameCount
+                    }
+                }
             }
         )
-        // The renderer owns the real device drawable, so it's the source of the per-eye frustum +
-        // IPD. Route its `view_config` through the same uplink as pose/hand.
         renderer.onViewConfig = { [weak client] line in client?.sendUplink(line) }
+        // Fired from the render thread when the compositor layer is invalidated (system exit, e.g.
+        // the Digital Crown). Hop to main so the observable lifecycle/UI state resets reliably.
+        renderer.onCompositorEnded = { [weak self] in
+            self?.mainAsync { self?.stopImmersive() }
+        }
         self.renderer = renderer
 
-        Task { await self.runTrackingSession(uplink: uplink) }
+        Task { await self.runTrackingSession(uplink: uplink, handEnabled: handEnabled) }
         client.start()
         renderer.startRenderLoop()
     }
 
     /// Run the ARKit providers and pump anchor updates into the uplink for the lifetime of the
     /// immersive space.
-    private func runTrackingSession(uplink: TrackingUplink) async {
+    private func runTrackingSession(uplink: TrackingUplink, handEnabled: Bool) async {
+        var providers: [any DataProvider] = [worldTracking]
+        if handEnabled {
+            providers.append(handTracking)
+        }
         do {
-            try await arSession.run([worldTracking, handTracking])
+            try await arSession.run(providers)
         } catch {
             setPhase(.error, detail: "ARKit run failed: \(error.localizedDescription)")
             return
@@ -116,6 +145,9 @@ final class AppModel {
     }
 
     func stopImmersive() {
+        guard immersiveSessionActive else { return }
+        immersiveSessionActive = false
+
         renderer?.stop()
         renderer = nil
         streamClient?.stop()
@@ -123,6 +155,10 @@ final class AppModel {
         uplink?.stop()
         uplink = nil
         arSession.stop()
-        setPhase(.idle, detail: "")
+        mainAsync { [weak self] in
+            self?.framesDecoded = 0
+            self?.phase = .idle
+            self?.statusDetail = ""
+        }
     }
 }

@@ -41,6 +41,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
         float far;
         int width;
         int height;
+        float[] renderOrientation;
     }
 
     private final AppleNativeBridge bridge;
@@ -62,7 +63,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
                 frame.frameId(), frame.timestampNs(),
                 frame.width(), frame.height(), frame.left(),
                 frame.width(), frame.height(), frame.right(),
-                frame.near(), frame.far()));
+                frame.near(), frame.far(), frame.renderOrientationXyzw()));
             BridgeMetrics.get().onFrameSubmitted(frame.copyTimeNs(), System.nanoTime() - t);
         });
     }
@@ -72,7 +73,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
      * Returns immediately; neither the GPU readback nor the socket write blocks the caller.
      */
     public void submitEyeTextures(int leftTextureId, int rightTextureId, int width, int height,
-        float near, float far) {
+        float near, float far, float[] renderOrientation) {
         if (!bridge.isConnected() || bridge.getSessionState() != AppleNativeBridge.SessionState.READY) {
             BridgeMetrics.get().onFrameDropped();
             return;
@@ -100,6 +101,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
             m.far = far;
             m.width = width;
             m.height = height;
+            m.renderOrientation = renderOrientation;
             m.filled = true;
 
             // 2) Map the previous slot (its DMA finished last frame) and send it.
@@ -111,7 +113,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
                     && mapInto(pboRight[prev], frame.right());
                 if (ok) {
                     frame.setCopyTimeNs(System.nanoTime() - t0);
-                    sender.commitFrame(frame, p.frameId, p.timestampNs, p.near, p.far);
+                    sender.commitFrame(frame, p.frameId, p.timestampNs, p.near, p.far, p.renderOrientation);
                     if (p.frameId % 90 == 0) {
                         VRSettings.LOGGER.debug("VisionCraft: {} backpressureDropped={}",
                             BridgeMetrics.get().summary(), sender.droppedFrames());

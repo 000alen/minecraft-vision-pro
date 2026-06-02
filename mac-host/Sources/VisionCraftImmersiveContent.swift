@@ -27,29 +27,11 @@ struct VisionCraftImmersiveContent: CompositorContent {
 
                 appModel.setARTrackingState("starting")
 
-                Task(priority: .high) {
-                    do {
-                        // NOTE: ARKit hand tracking (`HandTrackingProvider`) is a local on-device
-                        // visionOS feature and is `unavailable` on macOS. The Mac Spatial Rendering
-                        // / RemoteImmersiveSpace path only vends head pose via WorldTrackingProvider,
-                        // so we run head tracking only. Pinch input is plumbed through the bridge
-                        // `hand` message for a future visionOS-native host; see bridge/protocol.md.
-                        try await session.run([worldTrackingProvider])
-                        await MainActor.run {
-                            appModel.setARTrackingState(worldTrackingProvider.state.description)
-                        }
-                        appModel.compositor.attach(
-                            layer: layer,
-                            arKitSession: session,
-                            worldTrackingProvider: worldTrackingProvider,
-                            posePublisher: appModel.posePublisher
-                        )
-                    } catch {
-                        await MainActor.run {
-                            appModel.setARTrackingState("failed: \(error.localizedDescription)")
-                        }
-                    }
-                }
+                appModel.startRemoteImmersiveSession(
+                    layer: layer,
+                    session: session,
+                    worldTrackingProvider: worldTrackingProvider
+                )
             } else {
                 appModel.setARTrackingState("missing remoteDeviceIdentifier")
                 appModel.compositor.attach(layer: layer, posePublisher: appModel.posePublisher)

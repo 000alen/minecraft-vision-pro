@@ -51,3 +51,5 @@ Compositor may target 90 Hz on Vision Pro; Minecraft may not keep pace. Host sho
 
 - [RemoteImmersiveSpace](https://developer.apple.com/documentation/swiftui/remoteimmersivespace)
 - [Compositor Services](https://developer.apple.com/documentation/compositorservices)
+
+For visionOS companion work (hand tracking, on-device immersive, stream decode), see [vision-pro-references.md](vision-pro-references.md).

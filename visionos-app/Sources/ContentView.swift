@@ -47,6 +47,9 @@ struct ContentView: View {
         }
         .padding(28)
         .task { await appModel.requestAuthorizations() }
+        .onChange(of: appModel.immersiveSessionActive) { _, active in
+            if !active { immersiveOpen = false }
+        }
     }
 
     private var statusDot: some View {
@@ -69,25 +72,32 @@ struct ContentView: View {
         case .idle: "Ready"
         case .searching: "Searching for Mac…"
         case .connecting: "Connecting…"
-        case .streaming: "Streaming (\(appModel.framesDecoded) frames)"
+        case .streaming: "Streaming (\(appModel.framesDecoded) decoded frames)"
         case .immersiveNoVideo: "Immersive — waiting for host video"
         case .error: "Error"
         }
     }
 
+    @MainActor
     private func toggleImmersive() async {
         if immersiveOpen {
             await dismissImmersiveSpace()
             appModel.stopImmersive()
             immersiveOpen = false
         } else {
-            switch await openImmersiveSpace(id: AppModel.immersiveSpaceID) {
+            let result = await openImmersiveSpace(id: AppModel.immersiveSpaceID)
+            switch result {
             case .opened:
                 immersiveOpen = true
-            case .error, .userCancelled:
-                appModel.reportError("Could not open immersive space")
+            case .error:
+                NSLog("[VisionCraft] openImmersiveSpace(\(AppModel.immersiveSpaceID)) -> .error")
+                appModel.reportError("Could not open immersive space (.error) — see device log")
+            case .userCancelled:
+                NSLog("[VisionCraft] openImmersiveSpace(\(AppModel.immersiveSpaceID)) -> .userCancelled")
+                appModel.reportError("Immersive open cancelled (.userCancelled)")
             @unknown default:
-                break
+                NSLog("[VisionCraft] openImmersiveSpace -> unknown result \(String(describing: result))")
+                appModel.reportError("Immersive open: unknown result")
             }
         }
     }

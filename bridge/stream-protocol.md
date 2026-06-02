@@ -55,6 +55,8 @@ Every message is a length-prefixed envelope. All integers are **big-endian** (ne
 | `0x10` | `VIDEO_CONFIG` | Mac → AVP | JSON (UTF-8) |
 | `0x11` | `VIDEO_FRAME`  | Mac → AVP | `u32 metaLen` + meta JSON + HEVC access unit |
 | `0x20` | `UPLINK`       | AVP → Mac | one newline-terminated JSON line, verbatim from `bridge/protocol.md` |
+| `0x21` | `REQUEST_IDR`  | AVP → Mac | empty (host emits a keyframe on the next encode) |
+| `0x22` | `DOWNLINK`     | Mac → AVP | one newline-terminated JSON line (e.g. Java-initiated `recenter`) |
 | `0x30` | `BYE`          | both      | JSON (UTF-8), optional `reason` |
 
 The single most important reuse decision: **`UPLINK` payloads are the exact newline-JSON lines
@@ -99,8 +101,10 @@ changes (e.g. Minecraft window resize → eye-buffer resize).
 
 ## `VIDEO_FRAME`
 
+Envelope type is `0x11`; the payload is:
+
 ```
-[u8 type=0x11][u32 metaLen][meta JSON (metaLen bytes)][HEVC access unit bytes...]
+[u32 metaLen BE][meta JSON (metaLen bytes)][HEVC access unit bytes...]
 ```
 
 Meta JSON:
@@ -141,13 +145,13 @@ parses, the relay is a pure pass-through for the uplink.
 
 ## Reprojection & latency
 
-The companion submits each decoded frame to a `CompositorLayer` drawable tagged with the
-`DeviceAnchor` the Mac rendered it against. **visionOS reprojects every submitted drawable to the
-live head pose at display time**, so rotational head-look stays locked despite the encode →
-network → decode latency (~one to a few frames). Translation (walking) carries that latency, which
-is acceptable for Minecraft's slow locomotion. We do not implement custom timewarp; the platform
-compositor owns it. (This is the one piece Apple's `RemoteImmersiveSpace` gave us for free and we
-reproduce by relying on the standard compositor reprojection any CompositorServices app gets.)
+The companion submits each decoded frame to a `CompositorLayer` drawable. When the frame meta
+includes `render_orientation_xyzw`, the composite shader applies a rotational correction from the
+render-time head orientation to the live pose (and the drawable is **not** also tagged with the
+live `DeviceAnchor`, to avoid stacking that warp on platform reprojection). Frames without
+`render_orientation_xyzw` use the live `DeviceAnchor` and platform reprojection only.
+Translation (walking) still carries encode → network → decode latency, which is acceptable for
+Minecraft's slow locomotion.
 
 ## Connection lifecycle
 
@@ -156,14 +160,14 @@ reproduce by relying on the standard compositor reprojection any CompositorServi
 3. Mac sends `VIDEO_CONFIG`, then `VIDEO_FRAME` stream.
 4. AVP sends `UPLINK` (`pose`/`hand`/`recenter`).
 5. On video stall, the AVP holds the last frame (compositor keeps reprojecting it) and may
-   request a keyframe via a future `KEYFRAME_REQUEST`; v1 relies on the periodic keyframe.
+   send `REQUEST_IDR` (`0x21`); the host also emits periodic keyframes (~2 s).
 6. Disconnect: send `BYE` if possible; both sides reset and the AVP returns to a "waiting for
    host" state.
 
 ## Error handling
 
-- Envelope `length` > 64 MiB, or unknown `type` with a mismatched `version`: drop the connection.
-- `VIDEO_FRAME` with `metaLen` exceeding the envelope: drop the connection (desync).
+- Envelope `length` > 64 MiB, invalid `length` (< 1), or unknown `type` byte: drop the connection.
+- `VIDEO_FRAME` with `metaLen` exceeding the payload: drop the connection (desync).
 - Token mismatch in `HELLO`: `BYE` + close.
 - Decode failure: drop the frame, wait for the next keyframe; do not tear down the connection.
 

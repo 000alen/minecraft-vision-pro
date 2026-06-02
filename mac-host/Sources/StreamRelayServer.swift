@@ -12,6 +12,7 @@ final class StreamRelayServer {
     var onUplinkLine: ((String) -> Void)?
     var onViewerConnected: (() -> Void)?
     var onViewerDisconnected: (() -> Void)?
+    var onRequestKeyframe: (() -> Void)?
     var onStatus: ((String) -> Void)?
 
     private let port: UInt16
@@ -46,7 +47,7 @@ final class StreamRelayServer {
             throw BridgeServerError.invalidPort(Int(port))
         }
         let listener = try NWListener(using: params, on: nwPort)
-        listener.service = NWListener.Service(name: nil, type: "_visioncraft-stream._tcp")
+        listener.service = NWListener.Service(name: nil, type: StreamProtocol.bonjourServiceType)
         listener.serviceRegistrationUpdateHandler = { [weak self] change in
             if case let .add(endpoint) = change {
                 self?.onStatus?("Bonjour registered: \(endpoint)")
@@ -85,6 +86,11 @@ final class StreamRelayServer {
 
     func sendVideoFramePayload(_ payload: Data) {
         sendEnvelope(StreamProtocol.encode(.videoFrame, payload: payload))
+    }
+
+    /// Mac → AVP: one `bridge/protocol.md` line (e.g. `recenter` from Java).
+    func sendDownlink(_ payload: Data) {
+        sendEnvelope(StreamProtocol.encode(.downlink, payload: payload))
     }
 
     private func sendEnvelope(_ data: Data) {
@@ -173,15 +179,25 @@ final class StreamRelayServer {
             if let line = String(data: payload, encoding: .utf8) {
                 onUplinkLine?(line.hasSuffix("\n") ? line : line + "\n")
             }
+        case .requestIdr:
+            // Viewer lost sync (decode failure / mid-stream join): force the next encoded frame
+            // to be a keyframe so it can recover without waiting for the periodic IDR.
+            onRequestKeyframe?()
         case .bye:
             connection.cancel()
-        case .videoConfig, .videoFrame:
+        case .videoConfig, .videoFrame, .downlink:
             break // Mac → AVP only; ignore if echoed back.
         }
     }
 
     private func handleHello(_ payload: Data, on connection: NWConnection) {
         let json = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any]
+        if let version = json?["version"] as? Int, version != 1 {
+            onStatus?("Relay rejected viewer: unsupported protocol version")
+            connection.send(content: StreamProtocol.encode(.bye, json: #"{"type":"bye","version":1,"reason":"version_mismatch"}"#),
+                            completion: .contentProcessed { _ in connection.cancel() })
+            return
+        }
         let presentedToken = json?["token"] as? String ?? ""
         if !token.isEmpty, presentedToken != token {
             onStatus?("Relay rejected viewer: pairing token mismatch")

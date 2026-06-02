@@ -87,7 +87,7 @@ final class JavaBridgeServer {
             return
         }
         let bridge = BridgeConnection(connection: connection)
-        bridge.onFrame = { [weak self] left, right, w, h, frameId in
+        bridge.onFrame = { [weak self] left, right, w, h, frameId, renderOrientation in
             Task { @MainActor in
                 self?.appModel?.lastFrameId = frameId
                 self?.appModel?.framesReceived += 1
@@ -95,7 +95,8 @@ final class JavaBridgeServer {
             // Local immersive path (RemoteImmersiveSpace) and the companion relay path are
             // independent sinks for the same frame; either, both, or neither may be active.
             self?.compositor?.uploadFrame(left: left, right: right, width: w, height: h)
-            self?.relay?.submitFrame(left: left, right: right, width: w, height: h, frameId: frameId)
+            self?.relay?.submitFrame(left: left, right: right, width: w, height: h,
+                                     frameId: frameId, renderOrientation: renderOrientation)
         }
         bridge.onLine = { [weak self] line in
             self?.handleClientLine(line, bridge: bridge)
@@ -137,7 +138,9 @@ final class JavaBridgeServer {
         case "recenter":
             posePublisher?.recenter()
             let counter = posePublisher?.recenterCounter ?? 0
-            broadcast("{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n")
+            let line = "{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n"
+            broadcast(line)
+            relay?.forwardDownlink(line)
         case "ping":
             if let ts = obj["timestamp_ns"] {
                 bridge.send("{\"type\":\"pong\",\"version\":1,\"timestamp_ns\":\(ts)}\n")
@@ -152,7 +155,7 @@ final class JavaBridgeServer {
 
 private final class BridgeConnection {
     let connection: NWConnection
-    var onFrame: ((Data, Data, Int, Int, UInt64) -> Void)?
+    var onFrame: ((Data, Data, Int, Int, UInt64, [Float]?) -> Void)?
     var onLine: ((String) -> Void)?
     var onClose: (() -> Void)?
 
@@ -257,6 +260,13 @@ private final class BridgeConnection {
         let total = leftLen + rightLen
         guard buffer.count >= total else { return false }
 
+        // Optional render head orientation (ARKit world, xyzw) for client-side reprojection.
+        var renderOrientation: [Float]? = nil
+        if let arr = meta["render_orientation_xyzw"] as? [Any], arr.count == 4 {
+            let q = arr.compactMap { ($0 as? NSNumber)?.floatValue }
+            if q.count == 4 { renderOrientation = q }
+        }
+
         // Frame the payload using byte_length (authoritative for the wire), but only
         // hand a frame to the renderer when the declared bytes actually match the
         // RGBA8 dimensions. A mismatch is dropped (per protocol.md) without desyncing.
@@ -264,7 +274,8 @@ private final class BridgeConnection {
             // `onFrame` consumes synchronously (texture upload), so pass the buffer
             // slices directly — no extra ~10 MB/eye copy before the GPU upload.
             // Compaction below happens only after the handler returns.
-            onFrame?(buffer.prefix(leftLen), buffer.dropFirst(leftLen).prefix(rightLen), lw, lh, frameId)
+            onFrame?(buffer.prefix(leftLen), buffer.dropFirst(leftLen).prefix(rightLen), lw, lh,
+                     frameId, renderOrientation)
         }
         buffer.removeFirst(total)
         return true

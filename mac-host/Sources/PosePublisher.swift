@@ -24,10 +24,18 @@ final class PosePublisher {
     /// head pose, so the host stops emitting its own pose to avoid two sources fighting. Guarded by
     /// `lock` because it is toggled from the relay callback and read on the timer thread.
     private var suppressLocalPose = false
+    private var suppressLocalViewConfig = false
 
     func setSuppressLocalPose(_ suppress: Bool) {
         lock.lock()
         suppressLocalPose = suppress
+        lock.unlock()
+    }
+
+    /// When the companion uplinks on-device `view_config`, silence the host's remote-display frustum.
+    func setSuppressLocalViewConfig(_ suppress: Bool) {
+        lock.lock()
+        suppressLocalViewConfig = suppress
         lock.unlock()
     }
 
@@ -67,6 +75,10 @@ final class PosePublisher {
     /// clients. Reuses the same broadcast channel as pose so ordering/threading match.
     /// Called from the render loop; the broadcast closure marshals onto the bridge queue.
     func publishViewConfig(_ jsonLine: String) {
+        lock.lock()
+        let suppress = suppressLocalViewConfig
+        lock.unlock()
+        if suppress { return }
         sendToAll?(jsonLine)
     }
 

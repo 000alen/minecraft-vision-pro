@@ -48,6 +48,7 @@ public final class AsyncFrameSender implements AutoCloseable {
         private float near;
         private float far;
         private long copyTimeNs;
+        private float[] renderOrientationXyzw;
 
         /** Left-eye RGBA8 backing array, sized {@code width*height*4}. Fill in place. */
         public byte[] left() {
@@ -90,6 +91,11 @@ public final class AsyncFrameSender implements AutoCloseable {
 
         public void setCopyTimeNs(long ns) {
             this.copyTimeNs = ns;
+        }
+
+        /** Head orientation (ARKit world, xyzw) the frame was rendered for, or {@code null}. */
+        public float[] renderOrientationXyzw() {
+            return renderOrientationXyzw;
         }
 
         private void resize(int w, int h) {
@@ -151,11 +157,13 @@ public final class AsyncFrameSender implements AutoCloseable {
      * Hand a filled frame to the sender. Latest-wins: any frame still queued (not yet
      * picked up by the sender) is dropped and recycled.
      */
-    public void commitFrame(Frame frame, long frameId, long timestampNs, float near, float far) {
+    public void commitFrame(Frame frame, long frameId, long timestampNs, float near, float far,
+        float[] renderOrientationXyzw) {
         frame.frameId = frameId;
         frame.timestampNs = timestampNs;
         frame.near = near;
         frame.far = far;
+        frame.renderOrientationXyzw = renderOrientationXyzw;
         synchronized (lock) {
             if (!running) {
                 recycle(frame);

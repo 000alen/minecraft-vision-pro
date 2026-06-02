@@ -1,6 +1,13 @@
 import Foundation
 import Observation
 
+#if canImport(ARKit)
+import ARKit
+#endif
+#if canImport(CompositorServices)
+import CompositorServices
+#endif
+
 @MainActor
 @Observable
 final class VisionCraftAppModel {
@@ -10,7 +17,7 @@ final class VisionCraftAppModel {
     var framesReceived: UInt64 = 0
     var bridgePort: Int = 19735
     var controlPort: Int = 19734
-    var relayPort: Int = 19736
+    var relayPort: Int = Int(StreamProtocol.defaultPort)
     var relayToken: String = ""
     var diagnosticText: String = "Idle"
     var autoStartBridge = true
@@ -22,6 +29,7 @@ final class VisionCraftAppModel {
     var relayRunning = false
     var relayViewerConnected = false
     var framesEncoded: UInt64 = 0
+    private var remoteARKitSessionStarted = false
 
     let bridgeServer = JavaBridgeServer()
     let controlApiServer = ControlApiServer()
@@ -47,7 +55,7 @@ final class VisionCraftAppModel {
         ) {
             controlPort = configuredControlPort
         }
-        var resolvedRelayPort = 19736 // mirrors the `relayPort` default below
+        var resolvedRelayPort = Int(StreamProtocol.defaultPort) // mirrors the `relayPort` default below
         if let configuredRelayPort = Self.intValue(
             for: "VISIONCRAFT_RELAY_PORT",
             arguments: arguments,
@@ -126,6 +134,15 @@ final class VisionCraftAppModel {
                 self.relayViewerConnected = connected
                 // While the headset is the pose source, silence the host's local pose emitter.
                 self.posePublisher.setSuppressLocalPose(connected)
+                self.posePublisher.setSuppressLocalViewConfig(connected)
+                // In the companion (relay) architecture the Mac never opens a local
+                // immersive space, so the companion connecting is what makes a headset
+                // "present" to receive frames. Signal the Java bridge accordingly, or
+                // Minecraft's AppleNativeBridge refuses to submit frames ("Session not
+                // ready"). When it disconnects, fall back to the local immersive state.
+                let restingState: BridgeSessionState = self.immersiveSpaceOpen ? .ready : .closed
+                self.sessionState = connected ? .ready : restingState
+                self.bridgeServer.broadcastSession(connected ? .ready : restingState)
                 self.diagnosticText = connected ? "Companion connected" : "Companion disconnected"
             }
         }
@@ -144,6 +161,7 @@ final class VisionCraftAppModel {
         relayRunning = false
         relayViewerConnected = false
         posePublisher.setSuppressLocalPose(false)
+        posePublisher.setSuppressLocalViewConfig(false)
         diagnosticText = "Relay stopped"
     }
 
@@ -162,9 +180,13 @@ final class VisionCraftAppModel {
 
     func onImmersiveSpaceClosed() {
         immersiveSpaceOpen = false
-        sessionState = .closed
-        bridgeServer.broadcastSession(.closed)
-        diagnosticText = "Immersive space closed"
+        remoteARKitSessionStarted = false
+        sessionState = relayViewerConnected ? .ready : .closed
+        bridgeServer.broadcastSession(relayViewerConnected ? .ready : .closed)
+        compositor.detach()
+        diagnosticText = relayViewerConnected
+            ? "Immersive space closed (companion still connected)"
+            : "Immersive space closed"
     }
 
     func setSupportsRemoteScenes(_ supported: Bool) {
@@ -178,6 +200,46 @@ final class VisionCraftAppModel {
     func setARTrackingState(_ state: String) {
         arTrackingState = state
     }
+
+    #if canImport(CompositorServices)
+    /// Start (once) or refresh the remote ARKit session + compositor for `RemoteImmersiveSpace`.
+    @available(macOS 26.0, *)
+    func startRemoteImmersiveSession(
+        layer: LayerRenderer,
+        session: ARKitSession,
+        worldTrackingProvider: WorldTrackingProvider
+    ) {
+        if remoteARKitSessionStarted {
+            compositor.attach(
+                layer: layer,
+                arKitSession: session,
+                worldTrackingProvider: worldTrackingProvider,
+                posePublisher: posePublisher
+            )
+            return
+        }
+        remoteARKitSessionStarted = true
+        Task(priority: .high) {
+            do {
+                try await session.run([worldTrackingProvider])
+                await MainActor.run {
+                    self.setARTrackingState(worldTrackingProvider.state.description)
+                }
+                self.compositor.attach(
+                    layer: layer,
+                    arKitSession: session,
+                    worldTrackingProvider: worldTrackingProvider,
+                    posePublisher: self.posePublisher
+                )
+            } catch {
+                await MainActor.run {
+                    self.remoteARKitSessionStarted = false
+                    self.setARTrackingState("failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    #endif
 
     private func handleControlRequest(_ request: ControlApiServer.Request) async -> ControlApiServer.Response {
         switch (request.method, request.path) {

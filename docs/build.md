@@ -1,5 +1,9 @@
 # Build guide
 
+> **Running the full pipeline?** Use the reproducible recipe in [runbook.md](runbook.md)
+> (driven by `scripts/vc.sh`) — it handles stale processes, port conflicts, and the
+> host → companion → game → F7 ordering. This file covers the underlying build details.
+
 ## Hardware & OS
 
 - MacBook Pro with Apple Silicon (M4 recommended)
@@ -112,13 +116,47 @@ matching Fabric loader setup. Default VR plugin is **Apple Vision**. Launch
 **VisionCraftHost**, start the bridge, and open the immersive space before
 enabling VR.
 
-## Development loop
+## Running Minecraft on the headset (dev client — no launcher/account)
+
+The fastest way to run the game with the mod is the **Fabric Loom dev client**, not
+the Minecraft Launcher. It spins up Minecraft `26.1.2` with the vendored mod already
+on the classpath — no Microsoft account, no `mods/` copy, no installed profile.
+
+> The Gradle wrapper here rejects Java 25 (the game's runtime). Drive it with
+> Homebrew **`openjdk@21`**; Loom provisions the game JVM itself.
+
+```bash
+# from minecraft/VivecraftMod
+env JAVA_HOME="$(brew --prefix openjdk@21)" PATH="$(brew --prefix openjdk@21)/bin:$PATH" \
+  ./gradlew :fabric:runClient
+```
+
+In-game: at the title screen press **F7** (or click the `VR: OFF` toggle) to enable VR.
+The Apple Vision provider then connects to the loopback bridge on `127.0.0.1:19735`.
+
+### Companion-relay ordering (current architecture)
+
+In the companion path the Mac never opens its own immersive space — the **companion
+connecting** is what makes the bridge session `ready`, so Minecraft will refuse to
+submit frames ("Session not ready") until the headset is in. Order:
 
 ```text
-1. Run VisionCraftHost (immersive session ready)
-2. Launch Minecraft Fabric profile
-3. Enable VR in Vivecraft
-4. Watch host logs + bridge-test metrics
+1. Run VisionCraftHost            # auto-starts control API :19734, bridge :19735, relay :19736
+2. Companion → Enter VisionCraft  # connects over Bonjour; bridge session -> ready
+3. ./gradlew :fabric:runClient    # launch the game (openjdk@21 as above)
+4. Press F7 in-game               # VR ON -> real eye frames flow to the headset
+```
+
+Headless frame-source sanity check without the game (continuous test pattern):
+
+```bash
+./gradlew :bridge-test:run        # streams checkerboards until Ctrl-C; needs the companion connected
+```
+
+Watch the pipeline from the loopback control API:
+
+```bash
+curl -s http://127.0.0.1:19734/status   # relay_viewer_connected, frames_encoded, session_state, poses via logs
 ```
 
 ## Packaging (post-MVP)

@@ -127,15 +127,17 @@ public final class AppleNativeBridge implements AutoCloseable {
         try {
             obj = JsonParser.parseString(json).getAsJsonObject();
             if (!obj.has("version") || !obj.has("type")) {
+                close();
                 return;
             }
             version = obj.get("version").getAsInt();
             type = obj.get("type").getAsString();
         } catch (RuntimeException e) {
-            // A single malformed line must never tear down the reader thread.
+            close();
             return;
         }
         if (version != PROTOCOL_VERSION) {
+            close();
             return;
         }
         try {
@@ -240,11 +242,12 @@ public final class AppleNativeBridge implements AutoCloseable {
             }
             boolean tracked = h.has("tracked") && h.get("tracked").getAsBoolean();
             float pinch = h.has("pinch") ? h.get("pinch").getAsFloat() : 0f;
+            float pinchMiddle = h.has("pinch_middle") ? h.get("pinch_middle").getAsFloat() : 0f;
             float[] pos = h.has("position_m") ? parseFloatArray(h.getAsJsonArray("position_m"), 3)
                 : new float[]{0f, 0f, 0f};
             float[] ori = h.has("orientation_xyzw") ? parseFloatArray(h.getAsJsonArray("orientation_xyzw"), 4)
                 : new float[]{0f, 0f, 0f, 1f};
-            Hand hand = new Hand(tracked, pinch, pos, ori);
+            Hand hand = new Hand(tracked, pinch, pinchMiddle, pos, ori);
             if ("left".equals(h.get("chirality").getAsString())) {
                 left = hand;
             } else {
@@ -266,6 +269,17 @@ public final class AppleNativeBridge implements AutoCloseable {
         meta.addProperty("timestamp_ns", frame.timestampNs());
         meta.addProperty("near", frame.near());
         meta.addProperty("far", frame.far());
+
+        // Render head orientation (ARKit world, xyzw) for client-side rotational reprojection.
+        // Omitted when unknown so the viewer cleanly falls back to a no-op warp.
+        float[] orientation = frame.renderOrientationXyzw();
+        if (orientation != null && orientation.length == 4) {
+            com.google.gson.JsonArray q = new com.google.gson.JsonArray(4);
+            for (float c : orientation) {
+                q.add(c);
+            }
+            meta.add("render_orientation_xyzw", q);
+        }
 
         JsonObject left = eyeMeta(frame.leftWidth(), frame.leftHeight(), frame.leftRgba().length);
         JsonObject right = eyeMeta(frame.rightWidth(), frame.rightHeight(), frame.rightRgba().length);
@@ -407,11 +421,12 @@ public final class AppleNativeBridge implements AutoCloseable {
     public record Hand(
         boolean tracked,
         float pinch,
+        float pinchMiddle,
         float[] positionM,
         float[] orientationXyzw
     ) {
         public static Hand untracked() {
-            return new Hand(false, 0f, new float[]{0f, 0f, 0f}, new float[]{0f, 0f, 0f, 1f});
+            return new Hand(false, 0f, 0f, new float[]{0f, 0f, 0f}, new float[]{0f, 0f, 0f, 1f});
         }
     }
 
@@ -432,7 +447,9 @@ public final class AppleNativeBridge implements AutoCloseable {
         int rightHeight,
         byte[] rightRgba,
         float near,
-        float far
+        float far,
+        /** Head orientation (ARKit world, xyzw) the frame was rendered for, or {@code null}. */
+        float[] renderOrientationXyzw
     ) {}
 
     public enum SessionState {

@@ -53,7 +53,7 @@ struct HostControlView: View {
                 .disabled(!appModel.immersiveSpaceOpen)
             }
 
-            Text("Run Minecraft with Apple Vision provider after bridge + immersive space are active.")
+            Text("Run Minecraft with Apple Vision provider after the bridge is active. Use relay + companion for hand tracking, or open immersive for Mac remote display.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

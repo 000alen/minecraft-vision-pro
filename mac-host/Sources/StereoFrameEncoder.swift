@@ -23,6 +23,8 @@ final class StereoFrameEncoder {
         let keyframe: Bool
         let frameId: UInt64
         let ptsNanos: UInt64
+        /// Head orientation (ARKit world, xyzw) the frame was rendered for, or `nil` if unknown.
+        let renderOrientation: [Float]?
     }
 
     /// Called on the encoder queue for each compressed access unit.
@@ -63,12 +65,14 @@ final class StereoFrameEncoder {
     // MARK: - Encode
 
     /// Pack + encode one stereo pair. `left`/`right` are RGBA8, `eyeWidth × eyeHeight` each.
-    func encode(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64) {
+    func encode(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64,
+                renderOrientation: [Float]? = nil) {
         // Copy out of any caller-owned/transient storage so the async work is self-contained.
         let l = Data(left)
         let r = Data(right)
         queue.async {
-            self.encodeLocked(left: l, right: r, eyeWidth: eyeWidth, eyeHeight: eyeHeight, frameId: frameId)
+            self.encodeLocked(left: l, right: r, eyeWidth: eyeWidth, eyeHeight: eyeHeight,
+                              frameId: frameId, renderOrientation: renderOrientation)
         }
     }
 
@@ -136,7 +140,8 @@ final class StereoFrameEncoder {
         self.session = session
     }
 
-    private func encodeLocked(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64) {
+    private func encodeLocked(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64,
+                              renderOrientation: [Float]?) {
         if session == nil || self.eyeWidth != eyeWidth || self.eyeHeight != eyeHeight {
             configureLocked(eyeWidth: eyeWidth, eyeHeight: eyeHeight, fps: fps)
         }
@@ -197,11 +202,15 @@ final class StereoFrameEncoder {
             infoFlagsOut: nil
         ) { [weak self] status, _, sample in
             guard let self, status == noErr, let sample else { return }
-            self.queue.async { self.handleEncoded(sample: sample, frameId: frameId, ptsNanos: ptsNanos) }
+            self.queue.async {
+                self.handleEncoded(sample: sample, frameId: frameId, ptsNanos: ptsNanos,
+                                   renderOrientation: renderOrientation)
+            }
         }
     }
 
-    private func handleEncoded(sample: CMSampleBuffer, frameId: UInt64, ptsNanos: UInt64) {
+    private func handleEncoded(sample: CMSampleBuffer, frameId: UInt64, ptsNanos: UInt64,
+                               renderOrientation: [Float]?) {
         guard CMSampleBufferDataIsReady(sample) else { return }
 
         let keyframe = Self.isKeyframe(sample)
@@ -238,7 +247,8 @@ final class StereoFrameEncoder {
         }
 
         guard !au.isEmpty else { return }
-        onAccessUnit?(AccessUnit(data: au, keyframe: keyframe, frameId: frameId, ptsNanos: ptsNanos))
+        onAccessUnit?(AccessUnit(data: au, keyframe: keyframe, frameId: frameId, ptsNanos: ptsNanos,
+                                 renderOrientation: renderOrientation))
     }
 
     // MARK: - Helpers

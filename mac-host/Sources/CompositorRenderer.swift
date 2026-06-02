@@ -31,6 +31,10 @@ final class CompositorRenderer {
     private var textureSamplerState: MTLSamplerState?
     private var debugWorldTransform: simd_float4x4?
     private weak var layer: AnyObject?
+    #if canImport(CompositorServices)
+    @available(macOS 26.0, *)
+    private weak var activeLayer: LayerRenderer?
+    #endif
     private weak var posePublisher: PosePublisher?
     private var renderLoopRunning = false
     private let diagnosticsLock = NSLock()
@@ -62,18 +66,24 @@ final class CompositorRenderer {
         posePublisher: PosePublisher? = nil
     ) {
         self.layer = layer
+        self.activeLayer = layer
         self.posePublisher = posePublisher
         self.arKitSession = arKitSession
         self.worldTrackingProvider = worldTrackingProvider
         let renderDevice = layer.device
         commandQueue = renderDevice.makeCommandQueue()
         frameReceiver = FrameReceiver(device: renderDevice)
-        startRenderLoop(layer: layer)
+        startRenderLoop()
     }
     #endif
 
     func detach() {
         layer = nil
+        #if canImport(CompositorServices)
+        if #available(macOS 26.0, *) {
+            activeLayer = nil
+        }
+        #endif
         renderLoopRunning = false
         commandQueue = nil
         debugPipelines = [:]
@@ -103,17 +113,17 @@ final class CompositorRenderer {
 
     #if canImport(CompositorServices)
     @available(macOS 26.0, *)
-    private func startRenderLoop(layer: LayerRenderer) {
+    private func startRenderLoop() {
         guard !renderLoopRunning else { return }
         renderLoopRunning = true
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            self?.renderLoop(layer: layer)
+            self?.renderLoop()
         }
     }
 
     @available(macOS 26.0, *)
-    private func renderLoop(layer: LayerRenderer) {
+    private func renderLoop() {
         // CRITICAL: this loop runs on a long-lived background GCD block, so there
         // is no run loop draining the thread's autorelease pool. Every Metal
         // command buffer, drawable, and render encoder returned per frame is
@@ -121,6 +131,10 @@ final class CompositorRenderer {
         // until the process is OOM-killed (observed ~119 GB). Wrap each iteration.
         while renderLoopRunning {
             autoreleasepool {
+                guard let layer = activeLayer else {
+                    Thread.sleep(forTimeInterval: 1.0 / 120.0)
+                    return
+                }
                 switch layer.state {
                 case .paused:
                     updateDiagnostics(layerState: "paused")
@@ -271,7 +285,7 @@ final class CompositorRenderer {
         }
 
         if debugWorldTransform == nil {
-            debugWorldTransform = headTransform * Self.translation(x: 0, y: 0, z: -1.5)
+            debugWorldTransform = headTransform * StereoMath.translation(0, 0, -1.5)
         }
 
         if let pipeline = debugPipeline(
@@ -280,9 +294,16 @@ final class CompositorRenderer {
             device: colorTexture.device
         ) {
             let model = debugWorldTransform ?? matrix_identity_float4x4
+            let rightIndex = min(1, max(0, views.count - 1))
             var uniforms = DebugUniforms(
-                mvpLeft: Self.mvpMatrix(drawable: drawable, viewIndex: 0, model: model, headTransform: headTransform),
-                mvpRight: Self.mvpMatrix(drawable: drawable, viewIndex: min(1, views.count - 1), model: model, headTransform: headTransform),
+                mvpLeft: StereoMath.mvp(
+                    projection: drawable.computeProjection(viewIndex: 0),
+                    eyeTransform: views[0].transform, head: headTransform, model: model
+                ),
+                mvpRight: StereoMath.mvp(
+                    projection: drawable.computeProjection(viewIndex: rightIndex),
+                    eyeTransform: views[rightIndex].transform, head: headTransform, model: model
+                ),
                 time: time,
                 eyeIndex: 0
             )
@@ -511,14 +532,13 @@ final class CompositorRenderer {
         let views = drawable.views
         guard !views.isEmpty else { return }
 
-        var eyeFragments: [String] = []
-        eyeFragments.reserveCapacity(views.count)
-        for index in views.indices {
-            let projection = drawable.computeProjection(viewIndex: index)
-            let tangents = Self.tangents(fromProjection: projection)
+        let eyes = views.indices.map { index -> StereoMath.EyeView in
             let viewport = views[index].textureMap.viewport
-            eyeFragments.append(
-                "{\"index\":\(index),\"tangents\":[\(Self.fmt(tangents.x)),\(Self.fmt(tangents.y)),\(Self.fmt(tangents.z)),\(Self.fmt(tangents.w))],\"width\":\(Int(viewport.width)),\"height\":\(Int(viewport.height))}"
+            return StereoMath.EyeView(
+                index: index,
+                tangents: StereoMath.tangents(fromProjection: drawable.computeProjection(viewIndex: index)),
+                width: Int(viewport.width),
+                height: Int(viewport.height)
             )
         }
 
@@ -530,7 +550,7 @@ final class CompositorRenderer {
             ipd = simd_distance(SIMD3<Float>(a.x, a.y, a.z), SIMD3<Float>(b.x, b.y, b.z))
         }
 
-        let json = "{\"type\":\"view_config\",\"version\":1,\"ipd_m\":\(Self.fmt(ipd)),\"views\":[\(eyeFragments.joined(separator: ","))]}\n"
+        let json = StereoMath.viewConfigJSON(eyes: eyes, ipdMeters: ipd)
 
         viewConfigHeartbeat += 1
         let changed = json != lastSentViewConfig
@@ -539,71 +559,6 @@ final class CompositorRenderer {
         lastSentViewConfig = json
         viewConfigHeartbeat = 0
         posePublisher.publishViewConfig(json)
-    }
-
-    /// Extract the positive frustum tangents `[left, right, up, down]` from a Compositor
-    /// Services projection matrix. `cp_view_get_tangents` is unavailable on macOS, so we
-    /// recover them from the projection itself.
-    ///
-    /// Method is convention-agnostic: for any perspective projection, all view-space points
-    /// that map to a fixed NDC `(x, y)` lie on a single ray through the eye, so unprojecting
-    /// one NDC point per edge yields that edge's direction. We take magnitudes, so the result
-    /// is robust to the matrix's handedness / reverse-Z depth encoding.
-    @available(macOS 26.0, *)
-    static func tangents(fromProjection projection: simd_float4x4) -> SIMD4<Float> {
-        let inverse = projection.inverse
-        func edgeDirection(_ ndcX: Float, _ ndcY: Float) -> SIMD3<Float> {
-            // NDC depth is arbitrary for a perspective frustum; 0.5 is mid-range for both
-            // [0,1] and reverse-Z conventions.
-            let clip = SIMD4<Float>(ndcX, ndcY, 0.5, 1)
-            let view = inverse * clip
-            let w = abs(view.w) > 1e-7 ? view.w : 1
-            return SIMD3<Float>(view.x, view.y, view.z) / w
-        }
-        func tangent(_ lateral: Float, _ forward: Float) -> Float {
-            let denom = max(abs(forward), 1e-6)
-            // Clamp to a sane FOV so a degenerate matrix can never produce NaN/huge values.
-            return min(max(abs(lateral) / denom, 0.05), 10.0)
-        }
-        // Right/up convention: NDC x = -1 → left edge, +1 → right; y = +1 → top, -1 → bottom.
-        let left = edgeDirection(-1, 0)
-        let right = edgeDirection(1, 0)
-        let up = edgeDirection(0, 1)
-        let down = edgeDirection(0, -1)
-        return SIMD4<Float>(
-            tangent(left.x, left.z),
-            tangent(right.x, right.z),
-            tangent(up.y, up.z),
-            tangent(down.y, down.z)
-        )
-    }
-
-    /// Compact, locale-independent float formatting for protocol JSON (≈6 significant digits).
-    static func fmt(_ value: Float) -> String {
-        String(format: "%.6g", value)
-    }
-
-    @available(macOS 26.0, *)
-    private static func mvpMatrix(
-        drawable: LayerRenderer.Drawable,
-        viewIndex: Int,
-        model: simd_float4x4,
-        headTransform: simd_float4x4
-    ) -> simd_float4x4 {
-        let clampedIndex = min(max(0, viewIndex), max(0, drawable.views.count - 1))
-        let eyeWorldTransform = headTransform * drawable.views[clampedIndex].transform
-        let viewMatrix = eyeWorldTransform.inverse
-        let projection = drawable.computeProjection(viewIndex: clampedIndex)
-        return projection * viewMatrix * model
-    }
-
-    private static func translation(x: Float, y: Float, z: Float) -> simd_float4x4 {
-        simd_float4x4(
-            SIMD4<Float>(1, 0, 0, 0),
-            SIMD4<Float>(0, 1, 0, 0),
-            SIMD4<Float>(0, 0, 1, 0),
-            SIMD4<Float>(x, y, z, 1)
-        )
     }
     #endif
 

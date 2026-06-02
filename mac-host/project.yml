@@ -1,0 +1,51 @@
+name: VisionCraftHost
+
+# Declarative project spec consumed by XcodeGen (https://github.com/yonaskolb/XcodeGen).
+# The `.xcodeproj` is a generated build artifact (git-ignored) — never edit it by hand.
+# Regenerate after adding/removing files:  xcodegen generate   (or ../scripts/gen-projects.sh)
+
+options:
+  bundleIdPrefix: visioncraft
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  defaultConfig: Release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+
+targets:
+  VisionCraftHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      # Code shared with the visionOS companion (wire protocol, stereo math, Metal library).
+      # Single source of truth — compiled into both apps; see shared/README.md.
+      - path: ../shared/Sources
+      - path: ../shared/Shaders
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: visioncraft.host
+        PRODUCT_NAME: $(TARGET_NAME)
+        GENERATE_INFOPLIST_FILE: "YES"
+        ENABLE_HARDENED_RUNTIME: "YES"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: GBH6W69TD8           # Apple Development team (i000alen@icloud.com)
+        SWIFT_EMIT_LOC_STRINGS: "YES"
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+
+schemes:
+  VisionCraftHost:
+    build:
+      targets:
+        VisionCraftHost: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    archive:
+      config: Release

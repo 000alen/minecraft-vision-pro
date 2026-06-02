@@ -19,8 +19,14 @@ Every JSON object includes `"version": 1`. Receivers must reject unknown major v
 Metadata line, then binary:
 
 ```json
-{"type":"frame","version":1,"frame_id":12345,"timestamp_ns":123456789,"left":{"width":1512,"height":1680,"format":"rgba8","byte_length":10160640},"right":{"width":1512,"height":1680,"format":"rgba8","byte_length":10160640},"near":0.05,"far":512.0}
+{"type":"frame","version":1,"frame_id":12345,"timestamp_ns":123456789,"left":{"width":1512,"height":1680,"format":"rgba8","byte_length":10160640},"right":{"width":1512,"height":1680,"format":"rgba8","byte_length":10160640},"near":0.05,"far":512.0,"render_orientation_xyzw":[0.0,0.0,0.0,1.0]}
 ```
+
+- `render_orientation_xyzw` *(optional)* — the head orientation (raw ARKit world space, the
+  same frame the `pose` message reports) this image was rendered for. The native host forwards
+  it through the AVP stream so the on-device compositor can apply rotational async timewarp
+  (reproject the late frame to the current head pose). Omit it (or send identity) to disable the
+  warp; consumers must treat a missing value as "no reprojection".
 
 Immediately after the newline:
 
@@ -103,6 +109,11 @@ so a late-connecting Java client still receives it.
 Until the first `view_config` arrives, Java falls back to a symmetric FOV and its configured
 IPD. Receiving a `view_config` is idempotent — the client stores the latest values.
 
+On Apple Vision Pro, the Vivecraft Apple provider **withholds stereo frames** until the first
+`view_config` is received (symmetric fallback frames do not fuse on-device). The companion
+uplinks on-device `view_config`; when a companion is connected, the Mac host suppresses its own
+remote-display `view_config` so only one source is active.
+
 ### `hand`
 
 Per-hand tracking (pinch + advisory wrist pose). A host publishes this on the same
@@ -119,13 +130,15 @@ and running. Hands that are not currently tracked are reported with `tracked:fal
 > `hand`, both hands stay untracked and contribute no input.
 
 ```json
-{"type":"hand","version":1,"timestamp_ns":123456789,"hands":[{"chirality":"left","tracked":true,"position_m":[-0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.0},{"chirality":"right","tracked":true,"position_m":[0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.92}]}
+{"type":"hand","version":1,"timestamp_ns":123456789,"hands":[{"chirality":"left","tracked":true,"position_m":[-0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.0,"pinch_middle":0.0},{"chirality":"right","tracked":true,"position_m":[0.2,1.3,-0.3],"orientation_xyzw":[0.0,0.0,0.0,1.0],"pinch":0.92,"pinch_middle":0.0}]}
 ```
 
 - `hands[].chirality` — `left` | `right`. Either or both may be present.
 - `hands[].tracked` — `false` when the hand left the field of view; consumers must treat an
   untracked hand as "no input" (e.g. release any held pinch action).
 - `hands[].pinch` — index-tip↔thumb-tip pinch strength in `0..1` (`1` = fully pinched).
+- `hands[].pinch_middle` *(optional)* — middle-tip↔thumb-tip pinch strength in `0..1`. The seated
+  client maps `right` → jump (space) and `left` → sneak (left shift). Defaults to `0` when absent.
   Computed host-side from the joint distance; the client applies its own hysteresis to turn
   this into a discrete press so it never chatters at the threshold.
 - `hands[].position_m` — wrist position in the same tracking space as `pose.position_m`
@@ -135,7 +148,8 @@ and running. Hands that are not currently tracked are reported with `tracked:fal
   **Advisory**, same rationale as `position_m`.
 
 The seated client maps `right` pinch → primary action (attack/mine, GUI click) and `left`
-pinch → secondary action (use/place). A missing or untracked hand contributes no input.
+pinch → secondary action (use/place); middle-finger pinch maps `right` → jump and `left` →
+sneak. A missing or untracked hand contributes no input.
 
 ## Clocks and timestamps
 

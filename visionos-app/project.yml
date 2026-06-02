@@ -1,0 +1,63 @@
+name: VisionCraftCompanion
+
+# Declarative project spec consumed by XcodeGen (https://github.com/yonaskolb/XcodeGen).
+# The `.xcodeproj` is a generated build artifact (git-ignored) — never edit it by hand.
+# Regenerate after adding/removing files:  xcodegen generate   (or ../scripts/gen-projects.sh)
+
+options:
+  bundleIdPrefix: visioncraft
+  deploymentTarget:
+    # visionOS 26 — the renderer uses the modern CompositorServices frame API
+    # (`queryDrawables()`/`startSubmission()`), which is visionOS 26.0+. Matches the macOS host's
+    # 26.0 target and the current Vision Pro.
+    visionOS: "26.0"
+  createIntermediateGroups: true
+  defaultConfig: Release
+
+settings:
+  base:
+    # Swift 5 language mode: the CompositorLayer render closure runs off the main actor and the
+    # Swift 6 strict-concurrency checker flags the AppModel hand-offs (matches Apple's Metal
+    # immersive sample, which also ships in Swift 5 mode). Revisit when the renderer is fully
+    # actor-isolated.
+    SWIFT_VERSION: "5.0"
+
+targets:
+  VisionCraftCompanion:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Sources
+      # Code shared with the macOS host (wire protocol, stereo math, Metal library).
+      # Single source of truth — compiled into both apps; see shared/README.md.
+      - path: ../shared/Sources
+      - path: ../shared/Shaders
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: visioncraft.companion
+        PRODUCT_NAME: $(TARGET_NAME)
+        TARGETED_DEVICE_FAMILY: "7"           # visionOS
+        # Our partial Info.plist (ARKit usage strings + Bonjour) is merged with the standard
+        # generated keys (CFBundle*, scene manifest) so we keep one source of truth.
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/VisionCraftCompanion.entitlements
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: GBH6W69TD8           # Apple Development team (i000alen@icloud.com)
+        SWIFT_EMIT_LOC_STRINGS: "YES"
+        ENABLE_PREVIEWS: "YES"
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/Frameworks"
+
+schemes:
+  VisionCraftCompanion:
+    build:
+      targets:
+        VisionCraftCompanion: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    archive:
+      config: Release

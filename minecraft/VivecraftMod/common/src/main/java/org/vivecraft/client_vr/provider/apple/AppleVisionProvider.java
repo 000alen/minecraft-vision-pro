@@ -38,6 +38,9 @@ public class AppleVisionProvider extends MCVR {
     private static final float PINCH_RELEASE = 0.4f;
     private boolean rightPinchHeld = false;
     private boolean leftPinchHeld = false;
+    // Middle-finger pinch → movement keys: right = jump (space), left = sneak (left shift).
+    private boolean rightMiddleHeld = false;
+    private boolean leftMiddleHeld = false;
 
     private final AppleNativeBridge bridge = new AppleNativeBridge(BridgeSettings.host(), BridgeSettings.port());
     private final AppleSessionState sessionState = new AppleSessionState();
@@ -122,6 +125,14 @@ public class AppleVisionProvider extends MCVR {
             InputSimulator.releaseMouse(GLFW.GLFW_MOUSE_BUTTON_RIGHT);
             leftPinchHeld = false;
         }
+        if (rightMiddleHeld) {
+            InputSimulator.releaseKey(GLFW.GLFW_KEY_SPACE);
+            rightMiddleHeld = false;
+        }
+        if (leftMiddleHeld) {
+            InputSimulator.releaseKey(GLFW.GLFW_KEY_LEFT_SHIFT);
+            leftMiddleHeld = false;
+        }
         if (frameSubmitter != null) {
             frameSubmitter.close();
             frameSubmitter = null;
@@ -196,23 +207,36 @@ public class AppleVisionProvider extends MCVR {
             : AppleNativeBridge.HandState.empty();
         rightPinchHeld = applyPinch(hands.right(), rightPinchHeld, GLFW.GLFW_MOUSE_BUTTON_LEFT);
         leftPinchHeld = applyPinch(hands.left(), leftPinchHeld, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
+        rightMiddleHeld = applyMiddlePinch(hands.right(), rightMiddleHeld, GLFW.GLFW_KEY_SPACE);
+        leftMiddleHeld = applyMiddlePinch(hands.left(), leftMiddleHeld, GLFW.GLFW_KEY_LEFT_SHIFT);
     }
 
     private boolean applyPinch(AppleNativeBridge.Hand hand, boolean held, int mouseButton) {
-        final boolean wantDown;
-        if (!hand.tracked()) {
-            wantDown = false;
-        } else if (held) {
-            wantDown = hand.pinch() > PINCH_RELEASE;
-        } else {
-            wantDown = hand.pinch() > PINCH_ENGAGE;
-        }
+        boolean wantDown = wantPinch(hand.tracked(), hand.pinch(), held);
         if (wantDown && !held) {
             InputSimulator.pressMouse(mouseButton);
         } else if (!wantDown && held) {
             InputSimulator.releaseMouse(mouseButton);
         }
         return wantDown;
+    }
+
+    private boolean applyMiddlePinch(AppleNativeBridge.Hand hand, boolean held, int key) {
+        boolean wantDown = wantPinch(hand.tracked(), hand.pinchMiddle(), held);
+        if (wantDown && !held) {
+            InputSimulator.pressKey(key);
+        } else if (!wantDown && held) {
+            InputSimulator.releaseKey(key);
+        }
+        return wantDown;
+    }
+
+    /** Edge detection with hysteresis: higher engage threshold, lower release threshold. */
+    private static boolean wantPinch(boolean tracked, float strength, boolean held) {
+        if (!tracked) {
+            return false;
+        }
+        return held ? strength > PINCH_RELEASE : strength > PINCH_ENGAGE;
     }
 
     @Override

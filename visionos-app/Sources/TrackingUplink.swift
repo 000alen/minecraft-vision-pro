@@ -16,16 +16,31 @@ final class TrackingUplink {
 
     private let worldTracking: WorldTrackingProvider
     private let handTracking: HandTrackingProvider
+    private let handTrackingEnabled: Bool
 
     private let lock = NSLock()
     private var latestLeft: HandAnchor?
     private var latestRight: HandAnchor?
     private var recenterCounter = 0
     private var running = false
+    /// Head pose sample time in ARKit session seconds (from `LayerRenderer` presentation time).
+    private var presentationTimestampSeconds: Double?
 
-    init(worldTracking: WorldTrackingProvider, handTracking: HandTrackingProvider) {
+    init(
+        worldTracking: WorldTrackingProvider,
+        handTracking: HandTrackingProvider,
+        handTrackingEnabled: Bool
+    ) {
         self.worldTracking = worldTracking
         self.handTracking = handTracking
+        self.handTrackingEnabled = handTrackingEnabled
+    }
+
+    /// Called from the compositor render thread so pose matches the frame being displayed.
+    func setPresentationTimestamp(seconds: Double) {
+        lock.lock()
+        presentationTimestampSeconds = seconds
+        lock.unlock()
     }
 
     func recenter() {
@@ -36,6 +51,17 @@ final class TrackingUplink {
         sendLine?("{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n")
     }
 
+    /// Apply a `recenter` line forwarded from Java via the Mac relay (`DOWNLINK`).
+    func handleDownlinkLine(_ line: String) {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["type"] as? String == "recenter",
+              let counter = obj["recenter_counter"] as? Int else { return }
+        lock.lock()
+        recenterCounter = counter
+        lock.unlock()
+    }
+
     func stop() { running = false }
 
     /// Runs until the immersive space closes. Pumps hand anchor updates into `latest*` and
@@ -43,7 +69,9 @@ final class TrackingUplink {
     func run() async {
         running = true
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { [weak self] in await self?.pumpHandUpdates() }
+            if handTrackingEnabled {
+                group.addTask { [weak self] in await self?.pumpHandUpdates() }
+            }
             group.addTask { [weak self] in await self?.publishLoop() }
         }
     }
@@ -73,9 +101,13 @@ final class TrackingUplink {
     }
 
     private func publishPose() {
-        let anchor = worldTracking.queryDeviceAnchor(atTimestamp: CACurrentMediaTime())
+        lock.lock()
+        let sampleTime = presentationTimestampSeconds ?? CACurrentMediaTime()
+        let counter = recenterCounter
+        lock.unlock()
+
+        let anchor = worldTracking.queryDeviceAnchor(atTimestamp: sampleTime)
         let ts = Self.epochNanos()
-        lock.lock(); let counter = recenterCounter; lock.unlock()
 
         guard let anchor, anchor.isTracked else {
             sendLine?("{\"type\":\"pose\",\"version\":1,\"timestamp_ns\":\(ts),\"position_m\":[0,1.65,0],\"orientation_xyzw\":[0,0,0,1],\"tracking_state\":\"\(anchor == nil ? "unavailable" : "lost")\",\"recenter_counter\":\(counter)}\n")
@@ -84,10 +116,12 @@ final class TrackingUplink {
         let transform = anchor.originFromAnchorTransform
         let p = transform.columns.3
         let q = simd_quatf(transform).vector
-        sendLine?("{\"type\":\"pose\",\"version\":1,\"timestamp_ns\":\(ts),\"position_m\":[\(Self.f(p.x)),\(Self.f(p.y)),\(Self.f(p.z))],\"orientation_xyzw\":[\(Self.f(q.x)),\(Self.f(q.y)),\(Self.f(q.z)),\(Self.f(q.w))],\"tracking_state\":\"valid\",\"recenter_counter\":\(counter)}\n")
+        sendLine?("{\"type\":\"pose\",\"version\":1,\"timestamp_ns\":\(ts),\"position_m\":[\(StereoMath.fmt(p.x)),\(StereoMath.fmt(p.y)),\(StereoMath.fmt(p.z))],\"orientation_xyzw\":[\(StereoMath.fmt(q.x)),\(StereoMath.fmt(q.y)),\(StereoMath.fmt(q.z)),\(StereoMath.fmt(q.w))],\"tracking_state\":\"valid\",\"recenter_counter\":\(counter)}\n")
     }
 
     private func publishHands() {
+        guard handTrackingEnabled else { return }
+
         lock.lock()
         let left = latestLeft
         let right = latestRight
@@ -97,28 +131,33 @@ final class TrackingUplink {
         var fragments: [String] = []
         if let frag = Self.handFragment(left, chirality: "left") { fragments.append(frag) }
         if let frag = Self.handFragment(right, chirality: "right") { fragments.append(frag) }
-        guard !fragments.isEmpty else { return }
+        if fragments.isEmpty {
+            fragments = [
+                Self.untrackedHandFragment(chirality: "left"),
+                Self.untrackedHandFragment(chirality: "right"),
+            ]
+        }
         sendLine?("{\"type\":\"hand\",\"version\":1,\"timestamp_ns\":\(ts),\"hands\":[\(fragments.joined(separator: ","))]}\n")
+    }
+
+    private static func untrackedHandFragment(chirality: String) -> String {
+        "{\"chirality\":\"\(chirality)\",\"tracked\":false,\"position_m\":[0,0,0],\"orientation_xyzw\":[0,0,0,1],\"pinch\":0,\"pinch_middle\":0}"
     }
 
     private static func handFragment(_ anchor: HandAnchor?, chirality: String) -> String? {
         guard let anchor else { return nil }
         guard anchor.isTracked else {
-            return "{\"chirality\":\"\(chirality)\",\"tracked\":false,\"position_m\":[0,0,0],\"orientation_xyzw\":[0,0,0,1],\"pinch\":0}"
+            return untrackedHandFragment(chirality: chirality)
         }
         let transform = anchor.originFromAnchorTransform
         let p = transform.columns.3
         let q = simd_quatf(transform).vector
         let pinch = HandPinch.strength(for: anchor) ?? 0
-        return "{\"chirality\":\"\(chirality)\",\"tracked\":true,\"position_m\":[\(f(p.x)),\(f(p.y)),\(f(p.z))],\"orientation_xyzw\":[\(f(q.x)),\(f(q.y)),\(f(q.z)),\(f(q.w))],\"pinch\":\(f(pinch))}"
+        let pinchMiddle = HandPinch.middleStrength(for: anchor) ?? 0
+        return "{\"chirality\":\"\(chirality)\",\"tracked\":true,\"position_m\":[\(StereoMath.fmt(p.x)),\(StereoMath.fmt(p.y)),\(StereoMath.fmt(p.z))],\"orientation_xyzw\":[\(StereoMath.fmt(q.x)),\(StereoMath.fmt(q.y)),\(StereoMath.fmt(q.z)),\(StereoMath.fmt(q.w))],\"pinch\":\(StereoMath.fmt(pinch)),\"pinch_middle\":\(StereoMath.fmt(pinchMiddle))}"
     }
 
     private static func epochNanos() -> UInt64 {
         UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
-    }
-
-    /// Compact, locale-independent float formatting (≈6 significant digits) for protocol JSON.
-    private static func f(_ value: Float) -> String {
-        String(format: "%.6g", value)
     }
 }

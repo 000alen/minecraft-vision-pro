@@ -16,6 +16,18 @@ minecraft/VivecraftMod/build/
 minecraft/VivecraftMod/**/build/
 minecraft/VivecraftMod/.idea/
 
+# Generated Xcode projects — source of truth is each app's project.yml.
+# Regenerate with scripts/gen-projects.sh (needs `brew install xcodegen`).
+mac-host/VisionCraftHost.xcodeproj/
+visionos-app/VisionCraftCompanion.xcodeproj/
+
+# Runbook orchestrator scratch (vc.sh background logs + pidfiles)
+.run/
+visionos-app/build/
+
 # Local secrets
 .env
 *.local
+
+# External reference checkouts (read-only study material, not part of the build)
+reference/

@@ -26,6 +26,9 @@ public class AppleVisionStereoRenderer extends VRRenderer {
     private final AppleFrameSubmitter submitter;
     private int eyeWidth = DEFAULT_WIDTH;
     private int eyeHeight = DEFAULT_HEIGHT;
+    /** Log the "waiting for view_config" / "streaming" transitions exactly once each. */
+    private boolean loggedWaitingForViewConfig = false;
+    private boolean loggedStreamingStarted = false;
 
     public AppleVisionStereoRenderer(AppleVisionProvider provider, AppleFrameSubmitter submitter) {
         super(provider);
@@ -116,11 +119,41 @@ public class AppleVisionStereoRenderer extends VRRenderer {
 
     @Override
     public void endFrame() throws RenderConfigException {
+        // Gate streaming on a device view_config. Until it arrives, getProjectionMatrix() falls
+        // back to a *symmetric* FOV — but the Vision Pro's lenses use an *asymmetric* per-eye
+        // frustum, so symmetric frames cannot be fused by the viewer (the two eye images diverge
+        // and "won't merge into one"). Holding frames keeps the headset on its fuseable debug
+        // pattern for the ~1 s until the companion's measured view_config round-trips, so the
+        // first game frames the user ever sees are already geometrically correct.
+        if (provider.getBridge().getViewConfig() == null) {
+            if (!loggedWaitingForViewConfig) {
+                VRSettings.LOGGER.info("Vivecraft: Apple Vision waiting for device view_config before streaming "
+                    + "(headset shows standby pattern; symmetric frames would not fuse)");
+                loggedWaitingForViewConfig = true;
+            }
+            applyDeviceResolutionIfChanged();
+            GL11.glFlush();
+            return;
+        }
+        if (!loggedStreamingStarted) {
+            VRSettings.LOGGER.info("Vivecraft: Apple Vision view_config acquired — streaming fuseable stereo frames");
+            loggedStreamingStarted = true;
+        }
+
         float near = 0.05f;
         float far = this.lastFarClip > 0 ? this.lastFarClip : 512f;
+        // Raw ARKit-world head orientation (xyzw) this frame was rendered for. The viewer warps
+        // against its own latest ARKit pose, so we pass the unconverted quaternion (NOT the
+        // Minecraft-space one). Null when the pose is unknown ⇒ viewer no-ops the reprojection.
+        float[] renderOrientation = null;
+        AppleNativeBridge.Pose pose = provider.getBridge().getLatestPose();
+        if (pose != null && pose.isValid()) {
+            renderOrientation = pose.orientationXyzw().clone();
+        }
         // submitEyeTextures never blocks on the network: the readback is queued to the
         // async sender thread, so the render thread is not coupled to socket backpressure.
-        submitter.submitEyeTextures(LeftEyeTextureId, RightEyeTextureId, eyeWidth, eyeHeight, near, far);
+        submitter.submitEyeTextures(LeftEyeTextureId, RightEyeTextureId, eyeWidth, eyeHeight, near, far,
+            renderOrientation);
         // Pick up the device-recommended render size once the host reports it (next frame).
         applyDeviceResolutionIfChanged();
         GL11.glFlush();

@@ -1,0 +1,34 @@
+---
+description: visionOS / Apple Vision Pro companion — mandatory doc research before edits
+globs: visionos-app/**/*
+alwaysApply: false
+---
+
+# visionOS companion (Apple Vision Pro)
+
+Applies to `visionos-app/`. This app runs **on the headset**: immersive Metal rendering, HEVC decode, head + hand uplink.
+
+## Path constraints
+
+- Use `ImmersiveSpace` + `CompositorLayer` — never `RemoteImmersiveSpace`.
+- `HandTrackingProvider` and on-device hand pinch are **in scope here only**.
+- Match threading: compositor closure is off main actor; UI updates via `AppModel.mainAsync`.
+
+## Required research (before writing code)
+
+1. Read in-repo: `VisionCraftCompanionApp.swift`, `AppModel.swift`, `CompanionRenderer.swift`, `TrackingUplink.swift`, `HandPinch.swift`.
+2. Read [docs/vision-pro-references.md](../../docs/vision-pro-references.md) and `bridge/protocol.md` (`pose`, `hand`, `view_config`).
+3. Context7: library `/websites/developer_apple` — query the exact API (e.g. `HandTrackingProvider`, `CompositorLayer`, `LayerRenderer`).
+4. If Context7 is insufficient, fetch the official documentation page or visionOS article.
+5. Output **research notes** (links + which repo file is precedent) before proposing a diff.
+
+## Vision Pro behavior to preserve
+
+- Compositor **reprojects** submitted frames to live head pose — see `CompanionRenderer` comments.
+- Foveation stays **disabled** (`ContentStageConfiguration`) for uniform game frames.
+- `view_config` from the real device drawable drives Java frustum — do not clamp to symmetric FOV.
+- Hand uplink uses `bridge/protocol.md` JSON shape; untracked hands → no input.
+
+## Hardware
+
+Real device + Developer Mode for hand tracking validation. Simulator is limited for immersive + tracking bring-up.

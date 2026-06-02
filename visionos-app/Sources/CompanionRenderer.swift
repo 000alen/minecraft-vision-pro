@@ -20,9 +20,15 @@ final class CompanionRenderer {
     private static let maxFramesInFlight = 3
     private let inFlightSemaphore = DispatchSemaphore(value: CompanionRenderer.maxFramesInFlight)
 
+    /// Step-1 diagnostic gate: when `false`, the per-pixel fragment reproject is bypassed so a
+    /// correctly-oriented stereo frame is presented head-locked (isolates fusion from timewarp).
+    /// Step 2 supersedes this with ALVR-visionOS-style geometric reprojection.
+    private static let enableShaderReproject = false
+
     private let layerRenderer: LayerRenderer
     private let worldTracking: WorldTrackingProvider
     private weak var videoSource: VideoSource?
+    private weak var trackingUplink: TrackingUplink?
     private let onFrameDecoded: (UInt64) -> Void
 
     /// Emits a `bridge/protocol.md` `view_config` line (newline-terminated) whenever the device's
@@ -30,6 +36,8 @@ final class CompanionRenderer {
     /// receives it. The owner routes this to the stream uplink. Unlike the macOS host, these
     /// tangents come from the *real device* drawable, so Minecraft renders the exact AVP frustum.
     var onViewConfig: ((String) -> Void)?
+    /// Called when the compositor layer is invalidated (immersive space dismissed).
+    var onCompositorEnded: (() -> Void)?
     private var lastViewConfig: String?
     private var viewConfigHeartbeat = 0
 
@@ -48,11 +56,13 @@ final class CompanionRenderer {
         layerRenderer: LayerRenderer,
         worldTracking: WorldTrackingProvider,
         videoSource: VideoSource?,
+        trackingUplink: TrackingUplink?,
         onFrameDecoded: @escaping (UInt64) -> Void
     ) {
         self.layerRenderer = layerRenderer
         self.worldTracking = worldTracking
         self.videoSource = videoSource
+        self.trackingUplink = trackingUplink
         self.onFrameDecoded = onFrameDecoded
         self.device = layerRenderer.device
         self.commandQueue = layerRenderer.device.makeCommandQueue()!
@@ -82,6 +92,7 @@ final class CompanionRenderer {
                     renderNextFrame()
                 case .invalidated:
                     renderLoopRunning = false
+                    onCompositorEnded?()
                 @unknown default:
                     Thread.sleep(forTimeInterval: 1.0 / 90.0)
                 }
@@ -90,20 +101,46 @@ final class CompanionRenderer {
     }
 
     private func renderNextFrame() {
-        guard let frame = layerRenderer.queryNextFrame() else { return }
+        // Bound frames in flight (each command buffer retains its drawable + textures). Acquire a
+        // slot up front and release it on every exit path; the success path transfers ownership of
+        // the slot to the command buffer completion handler instead.
+        inFlightSemaphore.wait()
+        var slotHeld = true
+        defer { if slotHeld { inFlightSemaphore.signal() } }
+
+        guard let frame = layerRenderer.queryNextFrame() else {
+            Thread.sleep(forTimeInterval: 1.0 / 120.0)
+            return
+        }
 
         frame.startUpdate()
         frame.endUpdate()
 
-        guard let timing = frame.predictTiming() else { return }
+        guard let timing = frame.predictTiming() else {
+            Thread.sleep(forTimeInterval: 1.0 / 120.0)
+            return
+        }
         LayerRenderer.Clock().wait(until: timing.optimalInputTime)
 
         frame.startSubmission()
-        guard let drawable = frame.queryDrawables().first,
+        // An empty drawable list means the frame is no longer valid (typically the stage is tearing
+        // down). Return WITHOUT calling endSubmission(): doing so on an invalid frame logs
+        // "cp_frame_end_submission() failed because the frame is not valid".
+        let drawables = frame.queryDrawables()
+        guard let drawable = drawables.first(where: { $0.target == .builtIn }) ?? drawables.first,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             return
         }
 
+        let presentationSeconds = presentationTimeSeconds(drawable.frameTiming)
+        trackingUplink?.setPresentationTimestamp(seconds: presentationSeconds)
+
+        // Compositor Services drops any drawable presented without a device anchor ("Presenting a
+        // drawable without a device anchor. This drawable won't be presented."). Always tag it with
+        // the predicted presentation anchor. For streamed frames carrying `render_orientation_xyzw`,
+        // the composite shader already timewarps the image to *this same* predicted head pose, so
+        // the platform's late-stage reprojection corrects only the residual prediction error rather
+        // than stacking a second full rotation on the warp.
         let anchor = deviceAnchor(presentationTime: drawable.frameTiming)
         drawable.deviceAnchor = anchor
         let headTransform = anchor?.originFromAnchorTransform ?? matrix_identity_float4x4
@@ -113,22 +150,18 @@ final class CompanionRenderer {
         // ~1 Hz heartbeat.
         publishViewConfigIfNeeded(drawable: drawable)
 
-        if let decoded = videoSource?.latestFrame {
-            compositeVideo(decoded, into: drawable, commandBuffer: commandBuffer)
+        let decoded = videoSource?.latestFrame
+        if let decoded {
+            compositeVideo(decoded, into: drawable, headTransform: headTransform, commandBuffer: commandBuffer)
             onFrameDecoded(decoded.frameID)
         } else {
             drawDebugScene(headTransform: headTransform, drawable: drawable, commandBuffer: commandBuffer)
         }
 
         drawable.encodePresent(commandBuffer: commandBuffer)
-
-        if inFlightSemaphore.wait(timeout: .now() + 0.5) == .timedOut {
-            // GPU completion stalled (e.g. stage tearing down). Balance submission and drop.
-            frame.endSubmission()
-            return
-        }
         let semaphore = inFlightSemaphore
         commandBuffer.addCompletedHandler { _ in semaphore.signal() }
+        slotHeld = false // ownership of the in-flight slot transfers to the completion handler
         commandBuffer.commit()
         frame.endSubmission()
         presentedFrameCount &+= 1
@@ -140,14 +173,13 @@ final class CompanionRenderer {
         let views = drawable.views
         guard !views.isEmpty else { return }
 
-        var eyeFragments: [String] = []
-        eyeFragments.reserveCapacity(views.count)
-        for index in views.indices {
-            let projection = drawable.computeProjection(viewIndex: index)
-            let tangents = Self.tangents(fromProjection: projection)
+        let eyes = views.indices.map { index -> StereoMath.EyeView in
             let viewport = views[index].textureMap.viewport
-            eyeFragments.append(
-                "{\"index\":\(index),\"tangents\":[\(Self.fmt(tangents.x)),\(Self.fmt(tangents.y)),\(Self.fmt(tangents.z)),\(Self.fmt(tangents.w))],\"width\":\(Int(viewport.width)),\"height\":\(Int(viewport.height))}"
+            return StereoMath.EyeView(
+                index: index,
+                tangents: StereoMath.tangents(fromProjection: drawable.computeProjection(viewIndex: index)),
+                width: Int(viewport.width),
+                height: Int(viewport.height)
             )
         }
 
@@ -159,7 +191,7 @@ final class CompanionRenderer {
             ipd = simd_distance(SIMD3<Float>(a.x, a.y, a.z), SIMD3<Float>(b.x, b.y, b.z))
         }
 
-        let json = "{\"type\":\"view_config\",\"version\":1,\"ipd_m\":\(Self.fmt(ipd)),\"views\":[\(eyeFragments.joined(separator: ","))]}\n"
+        let json = StereoMath.viewConfigJSON(eyes: eyes, ipdMeters: ipd)
 
         viewConfigHeartbeat += 1
         let changed = json != lastViewConfig
@@ -170,43 +202,14 @@ final class CompanionRenderer {
         onViewConfig?(json)
     }
 
-    /// Recover the positive frustum tangents `[left, right, up, down]` from a Compositor Services
-    /// projection matrix — same convention-agnostic method as the macOS host, so both ends agree.
-    /// For any perspective projection, the inverse maps an NDC edge point to a view-space ray whose
-    /// lateral/forward ratio is that edge's tangent; magnitudes make it robust to handedness /
-    /// reverse-Z.
-    private static func tangents(fromProjection projection: simd_float4x4) -> SIMD4<Float> {
-        let inverse = projection.inverse
-        func edgeDirection(_ ndcX: Float, _ ndcY: Float) -> SIMD3<Float> {
-            let view = inverse * SIMD4<Float>(ndcX, ndcY, 0.5, 1)
-            let w = abs(view.w) > 1e-7 ? view.w : 1
-            return SIMD3<Float>(view.x, view.y, view.z) / w
-        }
-        func tangent(_ lateral: Float, _ forward: Float) -> Float {
-            let denom = max(abs(forward), 1e-6)
-            return min(max(abs(lateral) / denom, 0.05), 10.0)
-        }
-        let left = edgeDirection(-1, 0)
-        let right = edgeDirection(1, 0)
-        let up = edgeDirection(0, 1)
-        let down = edgeDirection(0, -1)
-        return SIMD4<Float>(
-            tangent(left.x, left.z),
-            tangent(right.x, right.z),
-            tangent(up.y, up.z),
-            tangent(down.y, down.z)
-        )
-    }
-
-    private static func fmt(_ value: Float) -> String {
-        String(format: "%.6g", value)
+    private func presentationTimeSeconds(_ timing: LayerRenderer.Frame.Timing) -> Double {
+        let duration = LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime)
+        return Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1_000_000_000_000_000_000
     }
 
     private func deviceAnchor(presentationTime: LayerRenderer.Frame.Timing) -> DeviceAnchor? {
-        let duration = LayerRenderer.Clock.Instant.epoch.duration(to: presentationTime.presentationTime)
-        let seconds = Double(duration.components.seconds)
-            + Double(duration.components.attoseconds) / 1_000_000_000_000_000_000
-        return worldTracking.queryDeviceAnchor(atTimestamp: seconds)
+        worldTracking.queryDeviceAnchor(atTimestamp: presentationTimeSeconds(presentationTime))
     }
 
     // MARK: - Video composite
@@ -214,6 +217,7 @@ final class CompanionRenderer {
     private func compositeVideo(
         _ decoded: DecodedFrame,
         into drawable: LayerRenderer.Drawable,
+        headTransform: simd_float4x4,
         commandBuffer: MTLCommandBuffer
     ) {
         let views = drawable.views
@@ -238,15 +242,56 @@ final class CompanionRenderer {
             color: colorTexture.pixelFormat,
             depth: drawable.depthTextures.first?.pixelFormat ?? .invalid
         ) {
-            var packing = UInt32(decoded.packing == .sideBySide ? 0 : 1)
+            var uniforms = compositeUniforms(decoded: decoded, drawable: drawable, headTransform: headTransform)
             pass.setRenderPipelineState(pipeline)
             pass.setDepthStencilState(depthState())
-            pass.setFragmentTexture(decoded.texture, index: 0)
+            pass.setFragmentTexture(decoded.luma, index: 0)
+            pass.setFragmentTexture(decoded.chroma, index: 1)
             pass.setFragmentSamplerState(textureSampler(), index: 0)
-            pass.setFragmentBytes(&packing, length: MemoryLayout<UInt32>.stride, index: 0)
+            pass.setFragmentBytes(&uniforms, length: MemoryLayout<CompositeUniforms>.stride, index: 0)
             pass.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
         pass.endEncoding()
+    }
+
+    /// Build the per-frame composite parameters: per-eye frustum tangents (so the shader can map a
+    /// display pixel ↔ a view ray) and the rotational-timewarp delta. The delta rotates the live
+    /// display ray back into the orientation the frame was rendered for:
+    /// `warp = R_render⁻¹ · R_now`, where both are ARKit-world head orientations. When the frame
+    /// carries no render orientation, the warp is identity and reprojection is disabled.
+    private func compositeUniforms(
+        decoded: DecodedFrame,
+        drawable: LayerRenderer.Drawable,
+        headTransform: simd_float4x4
+    ) -> CompositeUniforms {
+        let views = drawable.views
+        let leftTangents = StereoMath.tangents(fromProjection: drawable.computeProjection(viewIndex: 0))
+        let rightIndex = min(1, max(0, views.count - 1))
+        let rightTangents = StereoMath.tangents(fromProjection: drawable.computeProjection(viewIndex: rightIndex))
+
+        var warp = matrix_identity_float4x4
+        var reproject: UInt32 = 0
+        // Step 1 (diagnostic): the per-pixel fragment ray-march reproject is disabled to isolate
+        // stereo fusion from rotational timewarp. With it off, each eye samples its packed half 1:1
+        // (head-locked, Compositor Services still corrects scanout via `drawable.deviceAnchor`), so a
+        // correctly-oriented image should fuse. Step 2 replaces this with ALVR-visionOS's geometric
+        // reprojection (place the video quad at the frame's predicted pose, render through the live
+        // per-eye projection) rather than re-enabling the ray-march.
+        if Self.enableShaderReproject, let qRender = decoded.renderOrientation {
+            // Head orientation now (ARKit world ← device), same space as `qRender`.
+            let qNow = simd_quatf(headTransform)
+            let delta = qRender.inverse * qNow
+            warp = simd_float4x4(delta)
+            reproject = 1
+        }
+
+        return CompositeUniforms(
+            tangentsLeft: leftTangents,
+            tangentsRight: rightTangents,
+            warp: warp,
+            packing: decoded.packing == .sideBySide ? 0 : 1,
+            reproject: reproject
+        )
     }
 
     // MARK: - Debug scene
@@ -276,7 +321,7 @@ final class CompanionRenderer {
         }
 
         if debugWorldTransform == nil {
-            debugWorldTransform = headTransform * Self.translation(0, 0, -1.5)
+            debugWorldTransform = headTransform * StereoMath.translation(0, 0, -1.5)
         }
 
         guard let pipeline = debugPipeline(
@@ -288,9 +333,16 @@ final class CompanionRenderer {
         }
 
         let model = debugWorldTransform ?? matrix_identity_float4x4
+        let rightIndex = min(1, max(0, views.count - 1))
         var uniforms = DebugUniforms(
-            mvpLeft: Self.mvp(drawable: drawable, viewIndex: 0, model: model, head: headTransform),
-            mvpRight: Self.mvp(drawable: drawable, viewIndex: min(1, views.count - 1), model: model, head: headTransform),
+            mvpLeft: StereoMath.mvp(
+                projection: drawable.computeProjection(viewIndex: 0),
+                eyeTransform: views[0].transform, head: headTransform, model: model
+            ),
+            mvpRight: StereoMath.mvp(
+                projection: drawable.computeProjection(viewIndex: rightIndex),
+                eyeTransform: views[rightIndex].transform, head: headTransform, model: model
+            ),
             time: time,
             eyeIndex: 0
         )
@@ -381,27 +433,6 @@ final class CompanionRenderer {
         }
         return d
     }
-
-    private static func mvp(
-        drawable: LayerRenderer.Drawable,
-        viewIndex: Int,
-        model: simd_float4x4,
-        head: simd_float4x4
-    ) -> simd_float4x4 {
-        let index = min(max(0, viewIndex), max(0, drawable.views.count - 1))
-        let eyeWorld = head * drawable.views[index].transform
-        let projection = drawable.computeProjection(viewIndex: index)
-        return projection * eyeWorld.inverse * model
-    }
-
-    private static func translation(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
-        simd_float4x4(
-            SIMD4<Float>(1, 0, 0, 0),
-            SIMD4<Float>(0, 1, 0, 0),
-            SIMD4<Float>(0, 0, 1, 0),
-            SIMD4<Float>(x, y, z, 1)
-        )
-    }
 }
 
 private struct DebugUniforms {
@@ -409,4 +440,13 @@ private struct DebugUniforms {
     var mvpRight: simd_float4x4
     var time: Float
     var eyeIndex: UInt32
+}
+
+/// Mirrors `CompositeUniforms` in `Composite.metal` (same field order and 16-byte alignment).
+private struct CompositeUniforms {
+    var tangentsLeft: SIMD4<Float>   // [left, right, up, down]
+    var tangentsRight: SIMD4<Float>
+    var warp: simd_float4x4
+    var packing: UInt32              // 0 side-by-side, 1 top-bottom
+    var reproject: UInt32            // 0 disabled, 1 enabled
 }

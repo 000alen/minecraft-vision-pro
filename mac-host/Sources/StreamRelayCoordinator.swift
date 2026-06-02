@@ -35,6 +35,7 @@ final class StreamRelayCoordinator {
         server.onStatus = { [weak self] status in self?.onStatus?(status) }
         server.onViewerConnected = { [weak self] in self?.handleViewerConnected() }
         server.onViewerDisconnected = { [weak self] in self?.handleViewerDisconnected() }
+        server.onRequestKeyframe = { [weak self] in self?.encoder.requestKeyframe() }
         encoder.onAccessUnit = { [weak self] au in self?.handleAccessUnit(au) }
     }
 
@@ -57,7 +58,16 @@ final class StreamRelayCoordinator {
 
     /// Called from the loopback bridge's frame path. `left`/`right` are RGBA8 eye buffers; they may
     /// be transient slices, so the encoder copies them. Cheap no-op when no viewer is connected.
-    func submitFrame(left: Data, right: Data, width: Int, height: Int, frameId: UInt64) {
+    /// `renderOrientation` is the head orientation (ARKit world, xyzw) the frame was rendered for,
+    /// carried through to the viewer for rotational reprojection; `nil` when unknown.
+    /// Forward a `bridge/protocol.md` line to the connected companion (e.g. Java-initiated `recenter`).
+    func forwardDownlink(_ line: String) {
+        guard server.viewerReady else { return }
+        server.sendDownlink(Data(line.utf8))
+    }
+
+    func submitFrame(left: Data, right: Data, width: Int, height: Int, frameId: UInt64,
+                     renderOrientation: [Float]?) {
         guard server.viewerReady else { return }
         // Capture standalone copies synchronously (the caller's buffer is reused after return).
         let l = Data(left)
@@ -70,7 +80,8 @@ final class StreamRelayCoordinator {
                 self.encoder.configure(eyeWidth: width, eyeHeight: height, fps: self.fps)
             }
             self.sendConfigIfNeeded()
-            self.encoder.encode(left: l, right: r, eyeWidth: width, eyeHeight: height, frameId: frameId)
+            self.encoder.encode(left: l, right: r, eyeWidth: width, eyeHeight: height,
+                                frameId: frameId, renderOrientation: renderOrientation)
         }
     }
 
@@ -102,8 +113,12 @@ final class StreamRelayCoordinator {
     }
 
     private func handleAccessUnit(_ au: StereoFrameEncoder.AccessUnit) {
+        var orientationField = ""
+        if let q = au.renderOrientation, q.count == 4 {
+            orientationField = ",\"render_orientation_xyzw\":[\(StereoMath.fmt(q[0])),\(StereoMath.fmt(q[1])),\(StereoMath.fmt(q[2])),\(StereoMath.fmt(q[3]))]"
+        }
         let meta = """
-        {"frame_id":\(au.frameId),"pts_ns":\(au.ptsNanos),"keyframe":\(au.keyframe),"packing":"side_by_side","byte_length":\(au.data.count)}
+        {"frame_id":\(au.frameId),"pts_ns":\(au.ptsNanos),"keyframe":\(au.keyframe),"packing":"side_by_side","byte_length":\(au.data.count)\(orientationField)}
         """
         let payload = StreamProtocol.videoFramePayload(metaJSON: meta, accessUnit: au.data)
         server.sendVideoFramePayload(payload)
