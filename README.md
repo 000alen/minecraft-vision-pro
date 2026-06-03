@@ -13,17 +13,20 @@ MacBook Pro (M4)
   → ALVRClient on Apple Vision Pro
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the full system design, milestones, and risk register.
+See [docs/architecture.md](docs/architecture.md) for the full system design, milestones, and risk register. For canonical path names, see [docs/repo-structure.md](docs/repo-structure.md). For headset bring-up, use [docs/alvr-hardware-playbook.md](docs/alvr-hardware-playbook.md) before changing code from a hardware report.
 
 ## Repository layout
 
 | Path | Purpose |
 |------|---------|
 | `docs/` | Architecture, build, latency, transport notes |
-| `bridge/` | Versioned JSON protocol + Java JNI/socket bridge |
-| `mac-host/` | macOS 26+ ALVR server_core host app |
-| `visionos-app/` | Vendored `alvr-visionos` headset client |
-| `minecraft/VivecraftMod/` | **Vendored** Vivecraft fork (Apple provider + bridge in-tree) |
+| `bridge/` | Bridge v1 loopback protocol and Java bridge harness modules |
+| `bridge/java/lib/` | Java Bridge v1 client library Gradle module (`:bridge-lib`) |
+| `bridge/java/test-pattern-sender/` | Test-pattern sender Gradle module (`:bridge-test`) |
+| `bridge/java/mock-host/` | Mock host Gradle module (`:bridge-mock-host`) |
+| `mac-host/` | Mac ALVR host app |
+| `visionos-app/` | VisionCraft headset client (ALVRClient), vendored from `alvr-visionos` |
+| `minecraft/VivecraftMod/` | **Vendored** Vivecraft Apple provider + bridge in-tree |
 | `test/` | Bridge and math unit tests |
 
 ## Quick Start (Packaged Beta)
@@ -47,15 +50,13 @@ rustup-init -y
 source "$HOME/.cargo/env"
 ```
 
-For AVP installation, set a real Apple Developer Team ID and a unique bundle ID before preparing artifacts:
+Prepare artifacts first:
 
 ```bash
-export VISIONCRAFT_DEVELOPMENT_TEAM=<your team id>
-export VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID=com.example.visioncraft.alvrclient
 scripts/vc.sh bootstrap
 ```
 
-`bootstrap` installs nothing automatically; it verifies tools, initializes submodules, generates projects, builds ALVR artifacts when missing, and prints exact next steps.
+`bootstrap` installs nothing automatically; it verifies tools, initializes submodules, generates projects, builds ALVR artifacts when missing, and prints exact next steps. For AVP installation, open the headset project with `scripts/vc.sh headset` and adjust Signing & Capabilities in Xcode if your Apple team or bundle ID differs from the tracked project. Set `VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID` only when command-line launch tooling cannot read the Xcode build settings or needs to target a differently signed installed app.
 
 ### 2. Package the beta
 
@@ -63,15 +64,16 @@ scripts/vc.sh bootstrap
 scripts/vc.sh package-beta
 ```
 
-The package is written to `.run/beta` and includes `VisionCraftHost.app`, the Fabric mod jar, and `README-FIRST.txt`. The headset client still requires Apple signing/provisioning: use `scripts/vc.sh alvr-client` to open the ALVRClient Xcode project and install it on the paired AVP.
+The package is written to `.run/beta` and includes `VisionCraftHost.app`, the Fabric mod jar, and `README-FIRST.txt`. The headset client still requires Apple signing/provisioning: use `scripts/vc.sh headset` (or `alvr-client`) to open the ALVRClient Xcode project and install it on the paired AVP.
 
 ### 3. Run
 
 ```bash
-scripts/vc.sh host --rebuild
-scripts/vc.sh alvr-client
-scripts/vc.sh sender     # test pattern
-# or: scripts/vc.sh mc   # Minecraft dev client, then press F7
+scripts/vc.sh host --rebuild --synthetic
+scripts/vc.sh headset
+scripts/vc.sh verify     # ALVR-only synthetic stream
+scripts/vc.sh test-sender # test pattern
+# or: scripts/vc.sh minecraft # Minecraft dev client, then press F7
 scripts/vc.sh verify
 ```
 
@@ -90,8 +92,8 @@ The host app also shows guided readiness cards for setup, headset connection, br
 ## Implementation Order
 
 1. ALVR client/server_core integration
-2. Java fake stereo frame sender
-3. `AppleVisionProvider` in Vivecraft
+2. Test-pattern sender
+3. Vivecraft Apple provider
 4. Stereo main menu on headset
 5. In-world head-tracked view
 6. Hand/gamepad-style controller input through ALVR

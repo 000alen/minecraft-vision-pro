@@ -5,14 +5,20 @@ alwaysApply: true
 
 # VisionCraft core
 
-This repo streams Minecraft stereo to Apple Vision Pro via a Mac host linked against ALVR `server_core` and the vendored `alvr-visionos` client.
+This repo streams Minecraft stereo to Apple Vision Pro via the Mac ALVR host (`mac-host/`) linked against ALVR `server_core` and the VisionCraft headset client / ALVRClient (`visionos-app/`).
+
+Canonical names live in [docs/repo-structure.md](../../docs/repo-structure.md): Mac ALVR host, VisionCraft headset client (ALVRClient), Vivecraft Apple provider, Bridge v1, bridge Java library, test-pattern sender, and mock host. Do not move top-level app/vendor paths during nomenclature cleanup.
+
+Vendored ALVR source and version are project source: track them under `visionos-app/`; see `visionos-app/VENDORED.md`. Prepare scripts may validate/build artifacts, but must not be the sole source of VisionCraft ALVR changes.
 
 Before any Apple-platform change:
 
-1. Read [AGENTS.md](../../AGENTS.md) and identify whether you are editing the Mac ALVR host or the vendored ALVR visionOS client.
+1. Read [AGENTS.md](../../AGENTS.md) and identify whether you are editing the Mac ALVR host or the VisionCraft headset client (ALVRClient).
 2. Read the golden files listed there for the path you are editing.
 3. Cross-check [bridge/protocol.md](../../bridge/protocol.md) when touching pose, controller, hand, frames, or view config.
 
 Do not guess ALVR C ABI, VideoToolbox, Compositor Services, or ARKit APIs. Use the generated ALVR header, Context7 (`/websites/developer_apple`), or official documentation URLs.
+
+Tooling changes must follow [docs/tooling-architecture.md](../../docs/tooling-architecture.md): keep `scripts/vc.sh` as the dispatcher, put reusable behavior under `scripts/lib/`, and do not duplicate device/process/control/JSON snippets inline.
 
 Platform targets: macOS 26+, visionOS 26+, Xcode 26+.

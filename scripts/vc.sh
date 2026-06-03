@@ -4,7 +4,7 @@
 #
 # One robust, reproducible entrypoint for the Mac side of the pipeline: detect stale state,
 # clean it, build/launch the host, drive a frame source (Minecraft or the headless test pattern),
-# launch the ALVR Apple Vision Pro client, and verify the stream end to end.
+# launch the VisionCraft headset client (ALVRClient), and verify the stream end to end.
 #
 # Usage:  scripts/vc.sh <command>
 #   bootstrap           First-run beta setup: check prerequisites, prepare artifacts, print next steps.
@@ -13,188 +13,29 @@
 #   clean               Stop ALL VisionCraft processes (host, frame sources, gradle daemons); free ports.
 #   preflight           Verify toolchain + regenerate Xcode projects / ALVR artifacts if missing.
 #   package-beta        Build/package host + Fabric mod into .run/beta (use --dry-run to check only).
-#   host [--rebuild]    Clean+(re)launch VisionCraftHost; wait until control API is healthy.
-#   alvr-client         Open the ALVR client project and print AVP run steps.
-#   mc                  Launch the Minecraft Fabric dev client (openjdk@21) as the frame source.
-#   sender [n]          Launch the headless test-pattern sender (bridge-test). n=frame count (0=continuous).
+#   host [--rebuild] [--synthetic]
+#                       Clean+(re)launch VisionCraftHost; optionally arm host-native test frames.
+#   headset             Open the VisionCraft headset client (ALVRClient) project. Alias: alvr-client.
+#   synthetic           Enable host-native ALVR test frames (no Java/Minecraft bridge source).
+#   minecraft           Launch the Minecraft Fabric dev client (openjdk@21) as the frame source. Alias: mc.
+#   test-sender [n]     Launch the headless test-pattern sender (:bridge-test). n=frame count (0=continuous). Alias: sender.
 #   verify              Assert the live stream is healthy (ALVR client connected, frames flowing, session ready).
+#   observe [seconds]    Capture a reproducible diagnostics bundle under .run/observability/.
+#   avp-console [seconds] Launch ALVRClient via devicectl --console and capture headset stdout/stderr.
 #   stop                Alias for clean.
 #
 # Ports (loopback):  control 19734 · bridge 19735 (Java/Minecraft). ALVR uses its own LAN ports.
 set -euo pipefail
 
-# ----------------------------------------------------------------------------- constants
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="$REPO_ROOT/.run"
-CONTROL_PORT=19734
-BRIDGE_PORT=19735
-CONTROL_URL="http://127.0.0.1:${CONTROL_PORT}"
-
-HOST_PROJECT="$REPO_ROOT/mac-host/VisionCraftHost.xcodeproj"
-HOST_SCHEME="VisionCraftHost"
-HOST_DERIVED="$REPO_ROOT/mac-host/build"
-HOST_APP="$HOST_DERIVED/Build/Products/Debug/VisionCraftHost.app"
-
-ALVR_CLIENT_PROJECT="$REPO_ROOT/visionos-app/ALVRClient.xcodeproj"
-ALVR_CLIENT_SCHEME="ALVRClient"
-ALVR_CLIENT_DERIVED="$REPO_ROOT/visionos-app/build"
-ALVR_CLIENT_APP="$ALVR_CLIENT_DERIVED/Build/Products/Debug-xros/ALVRClient.app"
-ALVR_CLIENT_CORE="$REPO_ROOT/visionos-app/ALVRClient/ALVRClientCore.xcframework"
-ALVR_CLIENT_BUNDLE_ID="${VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID:-visioncraft.alvrclient}"
-
-MC_DIR="$REPO_ROOT/minecraft/VivecraftMod"
-HOST_VENDOR="$REPO_ROOT/mac-host/Vendor/ALVRServerCore"
-SERVER_CORE_HEADER="$HOST_VENDOR/alvr_server_core.h"
-SERVER_CORE_DYLIB="$HOST_VENDOR/libalvr_server_core.dylib"
-BETA_DIR="$RUN_DIR/beta"
-
-# ----------------------------------------------------------------------------- output helpers
-if [[ -t 1 ]]; then
-  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
-  C_YEL=$'\033[33m'; C_BLUE=$'\033[34m'; C_BOLD=$'\033[1m'
-else
-  C_RESET=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YEL=""; C_BLUE=""; C_BOLD=""
-fi
-step() { printf '%s\n' "${C_BOLD}${C_BLUE}==>${C_RESET} ${C_BOLD}$*${C_RESET}"; }
-ok()   { printf '%s\n' "  ${C_GREEN}✓${C_RESET} $*"; }
-warn() { printf '%s\n' "  ${C_YEL}!${C_RESET} $*"; }
-bad()  { printf '%s\n' "  ${C_RED}✗${C_RESET} $*"; }
-info() { printf '%s\n' "  ${C_DIM}·${C_RESET} $*"; }
-die()  { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
-
-# ----------------------------------------------------------------------------- low-level utils
-# pids currently LISTENing/connected on a TCP port (empty if free)
-port_pids() { lsof -nP -iTCP:"$1" -t 2>/dev/null | sort -u || true; }
-# pids with an ESTABLISHED connection on a port (both ends; caller filters)
-port_estab_pids() { lsof -nP -iTCP:"$1" -sTCP:ESTABLISHED -t 2>/dev/null | sort -u || true; }
-host_pids() { pgrep -f "VisionCraftHost.app/Contents/MacOS/VisionCraftHost" 2>/dev/null | sort -u || true; }
-
-# SIGTERM a set of pids, escalate to SIGKILL after a grace period.
-kill_pids() { # $1=label  $2..=pids
-  local label="$1"; shift
-  local pids=("$@"); [[ ${#pids[@]} -eq 0 ]] && return 0
-  info "stopping ${label}: ${pids[*]}"
-  kill "${pids[@]}" 2>/dev/null || true
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    local alive=()
-    for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && alive+=("$p"); done
-    [[ ${#alive[@]} -eq 0 ]] && return 0
-    sleep 0.3; pids=("${alive[@]}")
-  done
-  warn "force-killing ${label}: ${pids[*]}"
-  kill -9 "${pids[@]}" 2>/dev/null || true
-}
-
-wait_port_free() { # $1=port $2=timeout_s
-  local port="$1" timeout="${2:-8}" t=0
-  while :; do
-    [[ -z "$(port_pids "$port")" ]] && return 0
-    awk "BEGIN{exit !($t >= $timeout)}" && return 1
-    sleep 0.3; t=$(awk "BEGIN{print $t + 0.3}")
-  done
-}
-
-http_get()  { curl -fsS --max-time 3 "${CONTROL_URL}$1" 2>/dev/null || true; }
-http_post() { curl -fsS --max-time 5 -X POST "${CONTROL_URL}$1" 2>/dev/null || true; }
-
-wait_http_ok() { # $1=path $2=timeout_s
-  local path="$1" timeout="${2:-20}" t=0
-  while :; do
-    [[ -n "$(http_get "$path")" ]] && return 0
-    awk "BEGIN{exit !($t >= $timeout)}" && return 1
-    sleep 0.4; t=$(awk "BEGIN{print $t + 0.4}")
-  done
-}
-
-# Extract one field from a JSON blob ($1=json, $2=key). python3 first, sed fallback.
-json_field() {
-  local json="$1" key="$2"
-  if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$json" | python3 -c 'import sys,json
-try:
-    d=json.load(sys.stdin)
-    v=d.get(sys.argv[1],"")
-    print("" if v is None else (str(v).lower() if isinstance(v,bool) else v))
-except Exception:
-    pass' "$key" 2>/dev/null && return 0
-  fi
-  printf '%s' "$json" | sed -n "s/.*\"$key\":\"\{0,1\}\([^,\"}]*\).*/\1/p" | head -1
-}
-
-avp_udid() { # UDID of a connected Apple Vision Pro, or empty
-  xcrun devicectl list devices 2>/dev/null \
-    | grep -i "vision pro" | grep -i "connected" \
-    | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
-    | head -1 || true
-}
-
-brew_prefix() {
-  command -v brew >/dev/null 2>&1 || return 1
-  brew --prefix "$1" 2>/dev/null
-}
-
-java21_home() {
-  local prefix
-  prefix="$(brew_prefix openjdk@21 || true)"
-  [[ -n "$prefix" ]] && printf '%s/libexec/openjdk.jdk/Contents/Home' "$prefix"
-}
-
-require_java21() {
-  local jdk
-  jdk="$(java21_home)"
-  [[ -n "$jdk" && -d "$jdk" ]] || die "openjdk@21 JAVA_HOME not found (brew install openjdk@21)"
-  printf '%s' "$jdk"
-}
-
-artifacts_ready() {
-  [[ -d "$ALVR_CLIENT_PROJECT" && -d "$ALVR_CLIENT_CORE" && -f "$SERVER_CORE_HEADER" && -f "$SERVER_CORE_DYLIB" ]]
-}
-
-print_artifacts() {
-  [[ -d "$ALVR_CLIENT_PROJECT" ]] && ok "ALVRClient.xcodeproj" || warn "missing ALVRClient.xcodeproj"
-  [[ -d "$ALVR_CLIENT_CORE" ]] && ok "ALVRClientCore.xcframework" || warn "missing ALVRClientCore.xcframework"
-  [[ -f "$SERVER_CORE_HEADER" ]] && ok "alvr_server_core.h" || warn "missing alvr_server_core.h"
-  [[ -f "$SERVER_CORE_DYLIB" ]] && ok "libalvr_server_core.dylib" || warn "missing libalvr_server_core.dylib"
-}
-
-signing_summary() {
-  if [[ -n "${VISIONCRAFT_DEVELOPMENT_TEAM:-}" ]]; then
-    ok "development team: $VISIONCRAFT_DEVELOPMENT_TEAM"
-  else
-    warn "VISIONCRAFT_DEVELOPMENT_TEAM unset — Xcode will ask for a team before installing on AVP"
-  fi
-  info "ALVR client bundle id: $ALVR_CLIENT_BUNDLE_ID"
-}
-
-check_tool() { # $1=tool $2=install hint
-  local tool="$1" hint="${2:-}"
-  if command -v "$tool" >/dev/null 2>&1; then
-    ok "$tool"
-  elif [[ -n "$hint" ]]; then
-    bad "$tool missing ($hint)"
-  else
-    bad "$tool missing"
-  fi
-}
-
-ensure_projects() {
-  step "Refreshing generated Xcode projects"
-  command -v xcodegen >/dev/null 2>&1 || die "xcodegen not found (brew install xcodegen)"
-  "$REPO_ROOT/scripts/gen-projects.sh"
-  if ! artifacts_ready; then
-    "$REPO_ROOT/scripts/prepare-alvr.sh"
-  fi
-}
-
-# A frame source = something other than the host with an ESTABLISHED socket on the bridge port.
-frame_source_pids() {
-  local hp; hp="$(host_pids | tr '\n' ' ')"
-  local out=""
-  for p in $(port_estab_pids "$BRIDGE_PORT"); do
-    case " $hp " in *" $p "*) ;; *) out+="$p ";; esac
-  done
-  printf '%s' "$out" | xargs -n1 2>/dev/null | sort -u || true
-}
+VC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$VC_SCRIPT_DIR/lib/vc-env.sh"
+source "$VC_SCRIPT_DIR/lib/vc-log.sh"
+source "$VC_SCRIPT_DIR/lib/vc-json.sh"
+source "$VC_SCRIPT_DIR/lib/vc-process.sh"
+source "$VC_SCRIPT_DIR/lib/vc-device.sh"
+source "$VC_SCRIPT_DIR/lib/vc-control.sh"
+source "$VC_SCRIPT_DIR/lib/vc-tools.sh"
+source "$VC_SCRIPT_DIR/lib/vc-observe.sh"
 
 # ----------------------------------------------------------------------------- commands
 cmd_doctor() {
@@ -245,17 +86,6 @@ cmd_doctor() {
   step "Host status (control API)"
   local s; s="$(http_get /status)"
   if [[ -z "$s" ]]; then warn "control API not responding on :$CONTROL_PORT"; else print_status "$s"; fi
-}
-
-print_status() { # $1 = /status json
-  local s="$1"
-  info "session_state       = $(json_field "$s" session_state)"
-  info "alvr_running        = $(json_field "$s" alvr_running)"
-  info "alvr_client         = $(json_field "$s" alvr_client_connected)"
-  info "alvr_frames_sent    = $(json_field "$s" alvr_frames_sent)"
-  info "frames_received     = $(json_field "$s" frames_received)"
-  info "frames_encoded      = $(json_field "$s" frames_encoded)"
-  info "diagnostic          = $(json_field "$s" diagnostic)"
 }
 
 cmd_status() {
@@ -330,7 +160,7 @@ cmd_bootstrap() {
   info "1) scripts/vc.sh package-beta"
   info "2) open .run/beta/README-FIRST.txt"
   info "3) scripts/vc.sh host --rebuild"
-  info "4) scripts/vc.sh alvr-client"
+  info "4) scripts/vc.sh headset"
 }
 
 cmd_package_beta() {
@@ -369,6 +199,8 @@ cmd_package_beta() {
   [[ ${#jars[@]} -gt 0 ]] || die "Fabric mod jar not found under minecraft/VivecraftMod/build/libs"
   local last_index=$(( ${#jars[@]} - 1 ))
   cp "${jars[$last_index]}" "$BETA_DIR/Minecraft/"
+  local package_bundle_id
+  package_bundle_id="$(effective_alvr_client_bundle_id 2>/dev/null || printf 'unresolved; set VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID if needed')"
   cat >"$BETA_DIR/README-FIRST.txt" <<EOF
 VisionCraft Beta
 ================
@@ -377,12 +209,12 @@ VisionCraft Beta
    open "$BETA_DIR/Host/VisionCraftHost.app"
 
 2. Install/run the headset client:
-   scripts/vc.sh alvr-client
+   scripts/vc.sh headset
    Xcode must sign/install ALVRClient on the paired Apple Vision Pro.
 
 3. Launch Minecraft:
    Use the Fabric mod jar in "$BETA_DIR/Minecraft".
-   For development, you can also run: scripts/vc.sh mc
+   For development, you can also run: scripts/vc.sh minecraft
 
 4. Verify:
    scripts/vc.sh verify
@@ -390,15 +222,15 @@ VisionCraft Beta
 Detected configuration:
    Control API: http://127.0.0.1:$CONTROL_PORT
    Bridge port: $BRIDGE_PORT
-   ALVR client bundle id: $ALVR_CLIENT_BUNDLE_ID
-   Apple team: ${VISIONCRAFT_DEVELOPMENT_TEAM:-not set; choose a team in Xcode}
+   ALVR client bundle id: $package_bundle_id
+   Apple team: ${VISIONCRAFT_DEVELOPMENT_TEAM:-tracked project setting or Xcode UI selection}
 
 If the headset app cannot install, open visionos-app/ALVRClient.xcodeproj and select your team/bundle id in Signing & Capabilities.
 EOF
   cat >"$BETA_DIR/Headset/INSTALL-ON-AVP.txt" <<EOF
 Run this from the repo root:
 
-  scripts/vc.sh alvr-client
+  scripts/vc.sh headset
 
 Then choose your paired Apple Vision Pro in Xcode and press Cmd-R.
 This manual Xcode step is still required unless you distribute through TestFlight or another signed beta channel.
@@ -409,7 +241,15 @@ EOF
 
 cmd_host() {
   local rebuild=0
-  [[ "${1:-}" == "--rebuild" ]] && rebuild=1
+  local synthetic=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --rebuild) rebuild=1;;
+      --synthetic) synthetic=1;;
+      *) die "unknown host option: $1";;
+    esac
+    shift
+  done
   ensure_projects
   step "Resetting host"
   cmd_clean >/dev/null
@@ -432,10 +272,20 @@ cmd_host() {
     die "host launched but control API never responded on :$CONTROL_PORT"
   fi
   print_status "$(http_get /status)"
+  if [[ $synthetic -eq 1 ]]; then
+    step "Enabling host-native synthetic test frames"
+    http_post "/alvr/start?synthetic=true" >/dev/null || die "failed to enable synthetic ALVR frames"
+    print_status "$(http_get /status)"
+  fi
   step "Next"
   info "1) Put on the AVP and run ALVRClient  →  alvr_client_connected=true"
-  info "2) scripts/vc.sh mc      # launch Minecraft, then press F7 in-game"
-  info "3) scripts/vc.sh verify  # confirm the stream is live"
+  if [[ $synthetic -eq 1 ]]; then
+    info "2) Press Enter in ALVRClient; host-native test pattern should appear"
+    info "3) scripts/vc.sh verify  # confirm ALVR-only stream is live"
+  else
+    info "2) scripts/vc.sh synthetic  # ALVR-only test, or scripts/vc.sh minecraft + F7"
+    info "3) scripts/vc.sh verify     # confirm the stream is live"
+  fi
 }
 
 cmd_alvr_client() {
@@ -458,15 +308,8 @@ cmd_alvr_client() {
 }
 
 cmd_companion() {
-  warn "'companion' is deprecated; use: scripts/vc.sh alvr-client"
+  warn "'companion' is deprecated; use: scripts/vc.sh headset"
   cmd_alvr_client "$@"
-}
-
-guard_single_frame_source() {
-  local fs; fs="$(frame_source_pids | tr '\n' ' ')"
-  if [[ -n "$fs" ]]; then
-    die "a frame source is already connected on :$BRIDGE_PORT (pid ${fs}). Only one allowed. Run: scripts/vc.sh clean"
-  fi
 }
 
 cmd_mc() {
@@ -502,6 +345,15 @@ cmd_sender() {
   info "Tail with:  tail -f $log"
 }
 
+cmd_synthetic() {
+  [[ -n "$(http_get /health)" ]] || die "host not running — run: scripts/vc.sh host --synthetic"
+  step "Enabling host-native ALVR test pattern"
+  http_post "/alvr/start?synthetic=true" >/dev/null || die "failed to enable synthetic ALVR frames"
+  ok "synthetic source armed"
+  info "This bypasses Java/Minecraft. Frames advance once ALVRClient is connected and immersive."
+  print_status "$(http_get /status)"
+}
+
 cmd_verify() {
   local s; s="$(http_get /status)"
   [[ -z "$s" ]] && die "control API not responding — host not running"
@@ -516,13 +368,13 @@ cmd_verify() {
   if [[ "${a:-0}" =~ ^[0-9]+$ && "${b:-0}" =~ ^[0-9]+$ && "$b" -gt "$a" ]]; then
     ok "frames flowing (${a} → ${b})"
   else
-    bad "frames not advancing (${a} → ${b}) — start a frame source (vc.sh mc + F7, or vc.sh sender)"; fail=1
+    bad "frames not advancing (${a} → ${b}) — run vc.sh synthetic for ALVR-only, or vc.sh test-sender/minecraft + F7"; fail=1
   fi
   [[ $fail -eq 0 ]] && step "${C_GREEN}STREAM LIVE${C_RESET}" || step "${C_YEL}stream not fully live (see above)${C_RESET}"
   return "$fail"
 }
 
-usage() { sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local cmd="${1:-doctor}"; shift || true
@@ -534,11 +386,14 @@ main() {
     preflight) cmd_preflight "$@";;
     package-beta|package) cmd_package_beta "$@";;
     host)      cmd_host "$@";;
-    alvr-client|client) cmd_alvr_client "$@";;
+    headset|alvr-client|client) cmd_alvr_client "$@";;
     companion) cmd_companion "$@";;
-    mc)        cmd_mc "$@";;
-    sender)    cmd_sender "$@";;
+    synthetic) cmd_synthetic "$@";;
+    minecraft|mc) cmd_mc "$@";;
+    test-sender|sender) cmd_sender "$@";;
     verify)    cmd_verify "$@";;
+    observe)   cmd_observe "$@";;
+    avp-console) cmd_avp_console "$@";;
     -h|--help|help) usage;;
     *) printf '%s\n' "unknown command: $cmd" >&2; usage; exit 2;;
   esac

@@ -25,12 +25,26 @@ Update the vendored tree only deliberately after M5; document new upstream SHA i
 ## Native Host and ALVR Artifacts
 
 ```bash
-export VISIONCRAFT_DEVELOPMENT_TEAM=<your Apple team id>
-export VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID=com.example.visioncraft.alvrclient
 scripts/vc.sh bootstrap
 ```
 
-`bootstrap` checks prerequisites, initializes the vendored `alvr-visionos` tree, applies VisionCraft defaults, generates projects, builds `alvr_client_core`, builds the macOS `alvr_server_core` dylib/header, and places server artifacts under `mac-host/Vendor/ALVRServerCore/`.
+`bootstrap` checks prerequisites, verifies the source-controlled vendored `alvr-visionos` tree, generates projects, builds `alvr_client_core`, builds the macOS `alvr_server_core` dylib/header, and places server artifacts under `mac-host/Vendor/ALVRServerCore/`. The vendored ALVR version and VisionCraft source deltas must already live in the repo; prepare scripts validate/build them rather than owning project source changes.
+
+For a source-only ALVR hygiene check that does not build artifacts:
+
+```bash
+scripts/prepare-alvr.sh --check-source
+```
+
+`--check-source` validates required VisionCraft source deltas and intentionally allows dirty local vendored development. Before shipping, run the stricter source-control gate:
+
+```bash
+scripts/prepare-alvr.sh --check-source-control
+```
+
+That mode fails if `visionos-app` or `visionos-app/ALVR` has uncommitted or untracked source changes, or if the parent repositories do not record the checked-out submodule commits.
+
+`scripts/prepare-alvr.sh` does not rewrite tracked ALVRClient signing, bundle IDs, entitlements, or project files. The tracked ALVRClient target currently sets `DEVELOPMENT_TEAM` and `PRODUCT_BUNDLE_IDENTIFIER` in `ALVRClient.xcodeproj`; target-level Xcode build settings override values from `ALVRClient.xcconfig` and `Override.xcconfig`. Use Xcode's Signing & Capabilities tab, an explicit project source change, or command-line build settings for local signing changes. `Override.xcconfig` remains useful only for settings that are not overridden by target build settings.
 
 For a local compile-only host build without a command-line signing identity:
 
@@ -42,7 +56,7 @@ xcodebuild -project mac-host/VisionCraftHost.xcodeproj -scheme VisionCraftHost \
 To run on hardware, use:
 
 ```bash
-scripts/vc.sh alvr-client
+scripts/vc.sh headset
 ```
 
 This opens `visionos-app/ALVRClient.xcodeproj`. Choose the paired Apple Vision Pro and press Run. Xcode/TestFlight signing is still required for AVP installation.
@@ -81,7 +95,15 @@ After launching ALVRClient, check:
 curl http://127.0.0.1:19734/status
 ```
 
-For ALVR validation, expect `alvr_running: true`, `alvr_client_connected: true`, `session_state: "ready"`, and `alvr_frames_sent` advancing once a frame source is active.
+For ALVR validation, start with the host-native synthetic source:
+
+```bash
+scripts/vc.sh host --rebuild --synthetic
+# or, if the host is already running:
+scripts/vc.sh synthetic
+```
+
+Expect `alvr_running: true`, `alvr_client_connected: true`, `session_state: "ready"`, and `alvr_frames_sent` advancing after ALVRClient enters immersive mode. Only move to `scripts/vc.sh test-sender` (`sender`) or `scripts/vc.sh minecraft` (`mc`) after this ALVR-only path is stable.
 
 ## Bridge tests (any OS with Java 21)
 
@@ -90,6 +112,8 @@ For ALVR validation, expect `alvr_running: true`, `alvr_client_connected: true`,
 ./gradlew :bridge-test:run
 ```
 
+The bridge Java modules live under `bridge/java/`, but their Gradle project names
+remain `:bridge-lib`, `:bridge-mock-host`, and `:bridge-test` for compatibility.
 On Mac, start `VisionCraftHost` first so port `19735` is listening.
 
 ## Vivecraft (vendored)
@@ -131,8 +155,9 @@ ALVRClient connecting is what makes the bridge session `ready`, so Minecraft wil
 ```text
 1. Run VisionCraftHost            # auto-starts control API :19734, bridge :19735, ALVR server_core
 2. Run ALVRClient on AVP          # connects to server_core; bridge session -> ready
-3. ./gradlew :fabric:runClient    # launch the game (openjdk@21 as above)
-4. Press F7 in-game               # VR ON -> real eye frames flow to the headset
+3. Validate synthetic frames      # scripts/vc.sh synthetic; no Java/Minecraft involved
+4. ./gradlew :fabric:runClient    # launch the game (openjdk@21 as above)
+5. Press F7 in-game               # VR ON -> real eye frames flow to the headset
 ```
 
 Headless frame-source sanity check without the game (continuous test pattern):

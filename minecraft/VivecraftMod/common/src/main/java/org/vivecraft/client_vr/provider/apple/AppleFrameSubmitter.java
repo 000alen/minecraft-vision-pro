@@ -47,6 +47,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
     private final AppleNativeBridge bridge;
     private final AsyncFrameSender sender;
     private final AtomicLong frameId = new AtomicLong();
+    private final AtomicLong lastSendFailureLogNs = new AtomicLong();
 
     // Ping-pong pixel-pack buffers per eye (index 0/1) and the metadata for each slot.
     private final int[] pboLeft = {0, 0};
@@ -65,7 +66,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
                 frame.width(), frame.height(), frame.right(),
                 frame.near(), frame.far(), frame.renderOrientationXyzw()));
             BridgeMetrics.get().onFrameSubmitted(frame.copyTimeNs(), System.nanoTime() - t);
-        });
+        }, this::recordSendFailure);
     }
 
     /**
@@ -75,11 +76,13 @@ public final class AppleFrameSubmitter implements AutoCloseable {
     public void submitEyeTextures(int leftTextureId, int rightTextureId, int width, int height,
         float near, float far, float[] renderOrientation) {
         if (!bridge.isConnected() || bridge.getSessionState() != AppleNativeBridge.SessionState.READY) {
+            clearPendingReadbacks();
             BridgeMetrics.get().onFrameDropped();
             return;
         }
         int size = width * height * 4;
         if (size <= 0) {
+            clearPendingReadbacks();
             return;
         }
 
@@ -168,6 +171,24 @@ public final class AppleFrameSubmitter implements AutoCloseable {
         }
     }
 
+    private void clearPendingReadbacks() {
+        for (Pending pending : meta) {
+            pending.filled = false;
+            pending.renderOrientation = null;
+        }
+        slot = 0;
+    }
+
+    private void recordSendFailure(Throwable failure) {
+        BridgeMetrics.get().onFrameDropped();
+        long now = System.nanoTime();
+        long previous = lastSendFailureLogNs.get();
+        if (now - previous < 2_000_000_000L || !lastSendFailureLogNs.compareAndSet(previous, now)) {
+            return;
+        }
+        VRSettings.LOGGER.warn("VisionCraft: frame send failed: {}", failure.getMessage());
+    }
+
     private static void specBuffer(int pbo, int size) {
         GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, pbo);
         GL15.glBufferData(GL21.GL_PIXEL_PACK_BUFFER, size, GL15.GL_STREAM_READ);
@@ -190,6 +211,10 @@ public final class AppleFrameSubmitter implements AutoCloseable {
 
     public long getDroppedFrames() {
         return sender.droppedFrames();
+    }
+
+    public long getSendFailures() {
+        return sender.sendFailures();
     }
 
     @Override

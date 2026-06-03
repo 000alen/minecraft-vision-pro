@@ -1,5 +1,8 @@
 import Foundation
 import Network
+import os
+
+private let bridgeLogger = Logger(subsystem: "VisionCraftHost", category: "Bridge")
 
 enum BridgeServerError: Error, CustomStringConvertible {
     case invalidPort(Int)
@@ -9,6 +12,26 @@ enum BridgeServerError: Error, CustomStringConvertible {
         case .invalidPort(let port): "Invalid TCP port \(port) (expected 1...65535)"
         }
     }
+}
+
+private func bridgeMessageVersion(_ value: Any?) -> Int? {
+    switch value {
+    case let number as NSNumber:
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let intValue = number.intValue
+        guard number.doubleValue == Double(intValue) else { return nil }
+        return intValue
+    case is Bool:
+        return nil
+    case let intValue as Int:
+        return intValue
+    default:
+        return nil
+    }
+}
+
+private func isBridgeV1Message(_ object: [String: Any]) -> Bool {
+    bridgeMessageVersion(object["version"]) == 1
 }
 
 /// TCP server implementing bridge/protocol.md v1.
@@ -25,6 +48,8 @@ final class JavaBridgeServer {
     private var connections: [ObjectIdentifier: BridgeConnection] = [:]
     private let queue = DispatchQueue(label: "visioncraft.bridge.server")
     private var currentSession: BridgeSessionState = .closed
+    private var latestViewConfigLine: String?
+    private var viewConfigHeartbeat: DispatchSourceTimer?
 
     func start(port: Int) throws {
         guard let portValue = UInt16(exactly: port), portValue > 0 else {
@@ -41,6 +66,7 @@ final class JavaBridgeServer {
             self?.broadcast(line)
         }
         posePublisher?.startTimer()
+        startViewConfigHeartbeat()
     }
 
     func stop() {
@@ -49,9 +75,12 @@ final class JavaBridgeServer {
         posePublisher?.stop()
         posePublisher?.detach()
         queue.async {
-            self.connections.values.forEach { $0.close() }
+            self.viewConfigHeartbeat?.cancel()
+            self.viewConfigHeartbeat = nil
+            self.connections.values.forEach { $0.close(reason: "bridge server stopping") }
             self.connections.removeAll()
             self.currentSession = .closed
+            self.latestViewConfigLine = nil
         }
     }
 
@@ -60,14 +89,29 @@ final class JavaBridgeServer {
         let data = Data(json.utf8)
         queue.async {
             self.currentSession = state
+            if state != .ready {
+                self.latestViewConfigLine = nil
+            }
             self.connections.values.forEach { $0.send(data) }
+            if state == .ready, let latestViewConfigLine = self.latestViewConfigLine {
+                let viewConfigData = Data(latestViewConfigLine.utf8)
+                self.connections.values.forEach { $0.send(viewConfigData) }
+            }
         }
     }
 
     /// Forward a verbatim `bridge/protocol.md` line received from ALVR tracking/view events to all
     /// connected Java clients. The headset is the authoritative source while it is connected.
     func forwardUplink(_ line: String) {
-        broadcast(line)
+        let data = Data(line.utf8)
+        let isViewConfig = line.contains(#""type":"view_config""#)
+        queue.async {
+            if isViewConfig {
+                self.latestViewConfigLine = line
+                guard self.currentSession == .ready else { return }
+            }
+            self.connections.values.forEach { $0.send(data) }
+        }
     }
 
     private func broadcast(_ line: String) {
@@ -106,6 +150,26 @@ final class JavaBridgeServer {
         if currentSession != .closed {
             bridge.send("{\"type\":\"session\",\"version\":1,\"state\":\"\(currentSession.rawValue)\"}\n")
         }
+        if currentSession == .ready, let latestViewConfigLine {
+            bridge.send(latestViewConfigLine)
+        }
+    }
+
+    private func startViewConfigHeartbeat() {
+        queue.async {
+            guard self.viewConfigHeartbeat == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+            timer.setEventHandler { [weak self] in
+                guard let self,
+                      self.currentSession == .ready,
+                      let line = self.latestViewConfigLine else { return }
+                let data = Data(line.utf8)
+                self.connections.values.forEach { $0.send(data) }
+            }
+            self.viewConfigHeartbeat = timer
+            timer.resume()
+        }
     }
 
     /// True if a Network endpoint is an IPv4 (127.0.0.0/8) or IPv6 (::1) loopback
@@ -131,6 +195,10 @@ final class JavaBridgeServer {
 
         switch type {
         case "recenter":
+            guard isBridgeV1Message(obj) else {
+                bridge.close(reason: "recenter version mismatch")
+                return
+            }
             let counter: UInt64
             if let alvrCounter = alvr?.recordRecenter() {
                 counter = alvrCounter
@@ -141,10 +209,18 @@ final class JavaBridgeServer {
             let line = "{\"type\":\"recenter\",\"version\":1,\"recenter_counter\":\(counter)}\n"
             broadcast(line)
         case "ping":
+            guard isBridgeV1Message(obj) else {
+                bridge.close(reason: "ping version mismatch")
+                return
+            }
             if let ts = obj["timestamp_ns"] {
                 bridge.send("{\"type\":\"pong\",\"version\":1,\"timestamp_ns\":\(ts)}\n")
             }
         case "haptic":
+            guard isBridgeV1Message(obj) else {
+                bridge.close(reason: "haptic version mismatch")
+                return
+            }
             guard let hand = obj["hand"] as? String,
                   hand == "left" || hand == "right" else { break }
             let duration = Self.floatField(obj["duration_s"], fallback: 0.02)
@@ -180,6 +256,11 @@ private final class BridgeConnection {
     var onLine: ((String) -> Void)?
     var onClose: (() -> Void)?
 
+    private static let maxFramePayloadBytes = 256 * 1024 * 1024
+
+    private let queue = DispatchQueue(label: "visioncraft.bridge.connection")
+    private let closeLock = NSLock()
+    private var closed = false
     private var buffer = Data()
     private var pendingMeta: [String: Any]?
 
@@ -189,14 +270,27 @@ private final class BridgeConnection {
 
     func start() {
         connection.stateUpdateHandler = { [weak self] state in
-            if case .failed = state { self?.close() }
-            if case .cancelled = state { self?.onClose?() }
+            switch state {
+            case .failed, .cancelled:
+                self?.close(reason: "network state \(String(describing: state))")
+            default:
+                break
+            }
         }
-        connection.start(queue: .global(qos: .userInitiated))
+        connection.start(queue: queue)
         receive()
     }
 
-    func close() {
+    func close(reason: String = "closed") {
+        closeLock.lock()
+        guard !closed else {
+            closeLock.unlock()
+            return
+        }
+        closed = true
+        closeLock.unlock()
+
+        bridgeLogger.error("Bridge connection closing: \(reason, privacy: .public)")
         connection.cancel()
         onClose?()
     }
@@ -206,19 +300,32 @@ private final class BridgeConnection {
     }
 
     func send(_ data: Data) {
-        connection.send(content: data, completion: .contentProcessed { _ in })
+        let payload = Data(data)
+        queue.async { [weak self] in
+            guard let self, !self.isClosed else { return }
+            self.connection.send(content: payload, completion: .contentProcessed { [weak self] error in
+                if error != nil {
+                    self?.close(reason: "send failed: \(String(describing: error))")
+                }
+            })
+        }
     }
 
     private func receive() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, _, error in
-            guard let self else { return }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
+            guard let self, !self.isClosed else { return }
             if error != nil {
-                self.close()
+                self.close(reason: "receive failed: \(String(describing: error))")
                 return
             }
             if let data {
                 self.buffer.append(data)
                 self.processBuffer()
+            }
+            guard !self.isClosed else { return }
+            if isComplete {
+                self.close(reason: "peer completed receive")
+                return
             }
             self.receive()
         }
@@ -234,17 +341,20 @@ private final class BridgeConnection {
             guard let newline = buffer.firstIndex(of: 0x0A) else { break }
             let lineData = buffer.subdata(in: buffer.startIndex..<newline)
             buffer.removeSubrange(buffer.startIndex...newline)
-            guard let line = String(data: lineData, encoding: .utf8) else { continue }
-            if line.contains("\"type\":\"frame\"") {
-                if let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
-                    pendingMeta = json
-                } else {
-                    // A frame header we can't parse means we can't know the binary
-                    // payload length that follows, so the stream is desynced. Drop the
-                    // connection rather than scan the binary payload as if it were text.
-                    close()
+            guard let line = String(data: lineData, encoding: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let type = json["type"] as? String else {
+                // If a header is malformed, we cannot know whether binary bytes follow.
+                close(reason: "malformed line header")
+                break
+            }
+            if type == "frame" {
+                guard isBridgeV1Message(json) else {
+                    close(reason: "frame version mismatch")
                     break
                 }
+                bridgeLogger.info("Frame header accepted")
+                pendingMeta = json
             } else {
                 onLine?(line)
             }
@@ -254,17 +364,18 @@ private final class BridgeConnection {
     private func consumeFrameBinary(meta: [String: Any]) -> Bool {
         guard let left = meta["left"] as? [String: Any],
               let right = meta["right"] as? [String: Any],
-              let lw = left["width"] as? Int,
-              let lh = left["height"] as? Int,
-              let rw = right["width"] as? Int,
-              let rh = right["height"] as? Int,
-              let leftLen = left["byte_length"] as? Int,
-              let rightLen = right["byte_length"] as? Int,
+              let lw = bridgeMessageVersion(left["width"]),
+              let lh = bridgeMessageVersion(left["height"]),
+              let rw = bridgeMessageVersion(right["width"]),
+              let rh = bridgeMessageVersion(right["height"]),
+              let leftLen = bridgeMessageVersion(left["byte_length"]),
+              let rightLen = bridgeMessageVersion(right["byte_length"]),
               lw > 0, lh > 0, rw > 0, rh > 0,
-              leftLen >= 0, rightLen >= 0 else {
+              leftLen >= 0, rightLen >= 0,
+              leftLen <= Int.max - rightLen else {
             // Unparseable metadata: we cannot know the payload size, so the stream is
             // unrecoverable. Drop the connection rather than desync silently.
-            close()
+            close(reason: "unparseable frame metadata")
             return false
         }
 
@@ -274,11 +385,16 @@ private final class BridgeConnection {
         } else if let n = meta["frame_id"] as? UInt64 {
             frameId = n
         } else {
-            close()
+            close(reason: "missing frame_id")
             return false
         }
 
         let total = leftLen + rightLen
+        guard total <= Self.maxFramePayloadBytes else {
+            close(reason: "frame payload too large: \(total)")
+            return false
+        }
+        bridgeLogger.info("Frame metadata id=\(frameId) size=\(lw)x\(lh) payload=\(total)")
         guard buffer.count >= total else { return false }
 
         // Optional render head orientation (ARKit world, xyzw) for client-side reprojection.
@@ -291,7 +407,10 @@ private final class BridgeConnection {
         // Frame the payload using byte_length (authoritative for the wire), but only
         // hand a frame to the renderer when the declared bytes actually match the
         // RGBA8 dimensions. A mismatch is dropped (per protocol.md) without desyncing.
-        if leftLen == lw * lh * 4 && rightLen == rw * rh * 4 && lw == rw && lh == rh {
+        let expectedLeftBytes = Self.rgbaByteCount(width: lw, height: lh)
+        let expectedRightBytes = Self.rgbaByteCount(width: rw, height: rh)
+        if expectedLeftBytes == leftLen && expectedRightBytes == rightLen && lw == rw && lh == rh {
+            bridgeLogger.info("Frame payload complete id=\(frameId) size=\(lw)x\(lh)")
             // `onFrame` consumes synchronously (texture upload), so pass the buffer
             // slices directly — no extra ~10 MB/eye copy before the GPU upload.
             // Compaction below happens only after the handler returns.
@@ -300,5 +419,18 @@ private final class BridgeConnection {
         }
         buffer.removeFirst(total)
         return true
+    }
+
+    private var isClosed: Bool {
+        closeLock.lock()
+        defer { closeLock.unlock() }
+        return closed
+    }
+
+    private static func rgbaByteCount(width: Int, height: Int) -> Int? {
+        guard width <= Int.max / height else { return nil }
+        let pixels = width * height
+        guard pixels <= Int.max / 4 else { return nil }
+        return pixels * 4
     }
 }

@@ -46,7 +46,7 @@ CPU readback dominates until IOSurface path (M6).
 
 ## Diagnostics
 
-- `bridge-test` prints rolling avg/max per stage.
+- The test-pattern sender (`:bridge-test`) prints rolling avg/max per stage.
 - Host: VideoToolbox encode timing + signposts around `AlvrServerCoordinator` NAL submission.
 - Java: `AppleFrameSubmitter` logs dropped frames when `frame_id` skips.
 

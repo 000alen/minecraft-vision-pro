@@ -1,12 +1,12 @@
 ---
-description: vendored ALVR visionOS client — mandatory doc research before edits
+description: VisionCraft headset client (ALVRClient) — mandatory doc research before edits
 globs: visionos-app/**/*
 alwaysApply: false
 ---
 
-# ALVR visionOS client (Apple Vision Pro)
+# VisionCraft Headset Client (ALVRClient)
 
-Applies to `visionos-app/`. This is the vendored `alvr-visionos` client. Prefer keeping it close to upstream and applying VisionCraft-specific build/signing/default patches through `scripts/prepare-alvr.sh`.
+Applies to `visionos-app/`. This is the vendored `alvr-visionos` client used by Apple Vision Pro. The vendored ALVR version and VisionCraft modifications must be tracked in source control here; see `visionos-app/VENDORED.md`. `scripts/prepare-alvr.sh` validates/builds artifacts and must not be the only place source changes live.
 
 ## Path constraints
 

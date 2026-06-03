@@ -14,11 +14,9 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Consumer;
 
 /**
  * TCP client for VisionCraft bridge protocol v1.
@@ -35,7 +33,9 @@ public final class AppleNativeBridge implements AutoCloseable {
     private final String host;
     private final int port;
     private final AtomicBoolean connected = new AtomicBoolean(false);
+    private final AtomicBoolean closeRequested = new AtomicBoolean(false);
     private final AtomicLong lastPoseTimestampNs = new AtomicLong(0L);
+    private final AtomicLong connectionGeneration = new AtomicLong(0L);
     private final AtomicInteger recenterCounter = new AtomicInteger(0);
 
     private volatile Pose latestPose = Pose.identity();
@@ -43,10 +43,12 @@ public final class AppleNativeBridge implements AutoCloseable {
     private volatile ViewConfig latestViewConfig = null;
     private volatile HandState latestHands = HandState.empty();
     private volatile ControllerState latestControllerState = ControllerState.empty();
+    private volatile String lastDisconnectCause = null;
 
     private Socket socket;
     private BufferedOutputStream out;
     private Thread readerThread;
+    private long activeConnectionGeneration = 0L;
 
     public AppleNativeBridge() {
         this(BridgeSettings.host(), BridgeSettings.port());
@@ -58,7 +60,12 @@ public final class AppleNativeBridge implements AutoCloseable {
     }
 
     public synchronized void connect() throws IOException {
-        connectInternal();
+        connectInternal(5000);
+    }
+
+    /** Connect once with a caller-selected timeout, useful for non-blocking reconnect probes. */
+    public synchronized void connect(int timeoutMs) throws IOException {
+        connectInternal(timeoutMs);
     }
 
     /** Connect with retries while VisionCraftHost is starting. */
@@ -66,11 +73,11 @@ public final class AppleNativeBridge implements AutoCloseable {
         IOException last = null;
         for (int i = 0; i < attempts; i++) {
             try {
-                connectInternal();
+                connectInternal(5000);
                 return;
             } catch (IOException e) {
                 last = e;
-                close();
+                disconnect(SessionState.LOST, e.getMessage(), true);
                 try {
                     Thread.sleep(delayMs);
                 } catch (InterruptedException ie) {
@@ -82,26 +89,49 @@ public final class AppleNativeBridge implements AutoCloseable {
         throw last != null ? last : new IOException("Failed to connect to VisionCraft host");
     }
 
-    private void connectInternal() throws IOException {
+    private void connectInternal(int timeoutMs) throws IOException {
         if (connected.get()) {
             return;
         }
-        socket = new Socket();
-        socket.connect(new InetSocketAddress(host, port), 5000);
-        socket.setTcpNoDelay(true);
-        InputStream in = new BufferedInputStream(socket.getInputStream());
-        out = new BufferedOutputStream(socket.getOutputStream());
-        connected.set(true);
-        sessionState = SessionState.CLOSED;
-        latestControllerState = ControllerState.empty();
-        latestHands = HandState.empty();
-        readerThread = new Thread(() -> readLoop(in), "visioncraft-bridge-reader");
-        readerThread.setDaemon(true);
-        readerThread.start();
+        closeSocketResources();
+        Socket newSocket = new Socket();
+        try {
+            newSocket.connect(new InetSocketAddress(host, port), timeoutMs);
+            newSocket.setTcpNoDelay(true);
+            InputStream in = new BufferedInputStream(newSocket.getInputStream());
+            BufferedOutputStream newOut = new BufferedOutputStream(newSocket.getOutputStream());
+
+            long generation = connectionGeneration.incrementAndGet();
+            socket = newSocket;
+            out = newOut;
+            activeConnectionGeneration = generation;
+            closeRequested.set(false);
+            clearRemoteState();
+            lastDisconnectCause = null;
+            sessionState = SessionState.CLOSED;
+            connected.set(true);
+            readerThread = new Thread(() -> readLoop(generation, newSocket, in, newOut), "visioncraft-bridge-reader");
+            readerThread.setDaemon(true);
+            readerThread.start();
+        } catch (IOException e) {
+            try {
+                newSocket.close();
+            } catch (IOException ignored) {
+            }
+            lastDisconnectCause = e.getMessage();
+            sessionState = SessionState.LOST;
+            throw e;
+        }
     }
 
-    private void readLoop(InputStream in) {
+    private void readLoop(
+        long generation,
+        Socket ownedSocket,
+        InputStream in,
+        BufferedOutputStream ownedOut
+    ) {
         StringBuilder line = new StringBuilder();
+        String disconnectCause = "VisionCraft host closed the bridge";
         try {
             int b;
             while (connected.get() && (b = in.read()) != -1) {
@@ -113,14 +143,12 @@ public final class AppleNativeBridge implements AutoCloseable {
                 }
             }
         } catch (IOException e) {
-            if (connected.get()) {
-                sessionState = SessionState.LOST;
-            }
+            disconnectCause = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
         } finally {
-            connected.set(false);
-            sessionState = SessionState.CLOSED;
-            latestControllerState = ControllerState.empty();
-            latestHands = HandState.empty();
+            SessionState state = closeRequested.get() ? SessionState.CLOSED : SessionState.LOST;
+            String cause = closeRequested.get() ? null
+                : (lastDisconnectCause != null ? lastDisconnectCause : disconnectCause);
+            disconnectIfOwner(generation, ownedSocket, ownedOut, state, cause);
         }
     }
 
@@ -267,7 +295,8 @@ public final class AppleNativeBridge implements AutoCloseable {
                 right = hand;
             }
         }
-        return new HandState(left, right);
+        long timestampNs = obj.has("timestamp_ns") ? obj.get("timestamp_ns").getAsLong() : 0L;
+        return new HandState(timestampNs, left, right);
     }
 
     /**
@@ -359,10 +388,15 @@ public final class AppleNativeBridge implements AutoCloseable {
         meta.add("left", left);
         meta.add("right", right);
 
-        writeLine(meta);
-        out.write(frame.leftRgba());
-        out.write(frame.rightRgba());
-        out.flush();
+        try {
+            writeLine(meta);
+            out.write(frame.leftRgba());
+            out.write(frame.rightRgba());
+            out.flush();
+        } catch (IOException e) {
+            disconnect(SessionState.LOST, e.getMessage(), true);
+            throw e;
+        }
     }
 
     private static JsonObject eyeMeta(int w, int h, int byteLength) {
@@ -379,8 +413,13 @@ public final class AppleNativeBridge implements AutoCloseable {
         JsonObject msg = new JsonObject();
         msg.addProperty("type", "recenter");
         msg.addProperty("version", PROTOCOL_VERSION);
-        writeLine(msg);
-        out.flush();
+        try {
+            writeLine(msg);
+            out.flush();
+        } catch (IOException e) {
+            disconnect(SessionState.LOST, e.getMessage(), true);
+            throw e;
+        }
     }
 
     public synchronized void ping(long timestampNs) throws IOException {
@@ -389,8 +428,13 @@ public final class AppleNativeBridge implements AutoCloseable {
         msg.addProperty("type", "ping");
         msg.addProperty("version", PROTOCOL_VERSION);
         msg.addProperty("timestamp_ns", timestampNs);
-        writeLine(msg);
-        out.flush();
+        try {
+            writeLine(msg);
+            out.flush();
+        } catch (IOException e) {
+            disconnect(SessionState.LOST, e.getMessage(), true);
+            throw e;
+        }
     }
 
     public synchronized void sendHaptic(
@@ -407,8 +451,13 @@ public final class AppleNativeBridge implements AutoCloseable {
         msg.addProperty("duration_s", durationSeconds);
         msg.addProperty("frequency_hz", frequencyHz);
         msg.addProperty("amplitude", amplitude);
-        writeLine(msg);
-        out.flush();
+        try {
+            writeLine(msg);
+            out.flush();
+        } catch (IOException e) {
+            disconnect(SessionState.LOST, e.getMessage(), true);
+            throw e;
+        }
     }
 
     private void writeLine(JsonObject obj) throws IOException {
@@ -418,7 +467,8 @@ public final class AppleNativeBridge implements AutoCloseable {
 
     private void ensureConnected() throws IOException {
         if (!connected.get() || out == null) {
-            throw new IOException("Not connected to VisionCraft host");
+            String suffix = lastDisconnectCause == null ? "" : ": " + lastDisconnectCause;
+            throw new IOException("Not connected to VisionCraft host" + suffix);
         }
     }
 
@@ -449,6 +499,11 @@ public final class AppleNativeBridge implements AutoCloseable {
         return latestControllerState;
     }
 
+    /** Most recent transport-level disconnect cause, or {@code null} after a clean close/connect. */
+    public String getLastDisconnectCause() {
+        return lastDisconnectCause;
+    }
+
     public int getRecenterCounter() {
         return recenterCounter.get();
     }
@@ -459,18 +514,80 @@ public final class AppleNativeBridge implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        closeRequested.set(true);
+        disconnect(SessionState.CLOSED, null, true);
+    }
+
+    private synchronized void disconnect(SessionState state, String cause, boolean interruptReader) {
         connected.set(false);
-        sessionState = SessionState.CLOSED;
+        sessionState = state;
+        lastDisconnectCause = cause;
+        clearRemoteState();
+        closeSocketResources();
+        if (interruptReader && readerThread != null && readerThread != Thread.currentThread()) {
+            readerThread.interrupt();
+        }
+    }
+
+    private synchronized void disconnectIfOwner(
+        long generation,
+        Socket ownedSocket,
+        BufferedOutputStream ownedOut,
+        SessionState state,
+        String cause
+    ) {
+        if (activeConnectionGeneration != generation || socket != ownedSocket || out != ownedOut) {
+            closeOwnedSocketResources(ownedOut, ownedSocket);
+            return;
+        }
+        connected.set(false);
+        sessionState = state;
+        lastDisconnectCause = cause;
+        clearRemoteState();
+        closeSocketResources();
+    }
+
+    private void clearRemoteState() {
+        latestPose = Pose.identity();
+        latestViewConfig = null;
         latestControllerState = ControllerState.empty();
         latestHands = HandState.empty();
-        if (socket != null) {
+        recenterCounter.set(0);
+        lastPoseTimestampNs.set(0L);
+    }
+
+    private void closeSocketResources() {
+        BufferedOutputStream currentOut = out;
+        out = null;
+        if (currentOut != null) {
             try {
-                socket.close();
+                currentOut.close();
             } catch (IOException ignored) {
             }
         }
-        if (readerThread != null) {
-            readerThread.interrupt();
+        Socket currentSocket = socket;
+        socket = null;
+        activeConnectionGeneration = 0L;
+        if (currentSocket != null) {
+            try {
+                currentSocket.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private static void closeOwnedSocketResources(BufferedOutputStream ownedOut, Socket ownedSocket) {
+        if (ownedOut != null) {
+            try {
+                ownedOut.close();
+            } catch (IOException ignored) {
+            }
+        }
+        if (ownedSocket != null) {
+            try {
+                ownedSocket.close();
+            } catch (IOException ignored) {
+            }
         }
     }
 
@@ -529,9 +646,9 @@ public final class AppleNativeBridge implements AutoCloseable {
     }
 
     /** Both hands' latest state. */
-    public record HandState(Hand left, Hand right) {
+    public record HandState(long timestampNs, Hand left, Hand right) {
         public static HandState empty() {
-            return new HandState(Hand.untracked(), Hand.untracked());
+            return new HandState(0L, Hand.untracked(), Hand.untracked());
         }
     }
 

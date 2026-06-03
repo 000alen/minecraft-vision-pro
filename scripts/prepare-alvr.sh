@@ -3,27 +3,19 @@
 # Prepare the vendored ALVR visionOS client and macOS server_core artifacts.
 #
 # The source of truth for the ALVR protocol is the `visionos-app` submodule and
-# its nested `ALVR` submodule. This script keeps the local checkout reproducible:
-# it initializes nested submodules, applies tiny local patches needed for this
-# pinned commit, builds the visionOS client_core xcframework, and builds the
-# macOS server_core dylib/header consumed by VisionCraftHost.
+# its nested `ALVR` submodule. VisionCraft ALVRClient/server_core changes are
+# committed directly in the vendored source; this script validates those deltas
+# and builds derived artifacts consumed by the headset client and Mac host.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ALVR_VISIONOS="$REPO_ROOT/visionos-app"
 ALVR_TREE="$ALVR_VISIONOS/ALVR"
 HOST_VENDOR="$REPO_ROOT/mac-host/Vendor/ALVRServerCore"
-TEAM_ID="${VISIONCRAFT_DEVELOPMENT_TEAM:-}"
-CLIENT_BUNDLE_ID="${VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID:-visioncraft.alvrclient}"
-PATCH_VERSION="visioncraft-alvr-artifacts-v3-controller-input"
+ARTIFACT_SOURCE_VERSION="visioncraft-alvr-artifacts-v4-direct-source"
 REBUILD=0
-
-for arg in "$@"; do
-  case "$arg" in
-    --rebuild) REBUILD=1 ;;
-    *) echo "unknown argument: $arg" >&2; exit 2 ;;
-  esac
-done
+CHECK_SOURCE_ONLY=0
+CHECK_SOURCE_CONTROL=0
 
 step() { printf '==> %s\n' "$*"; }
 info() { printf '  · %s\n' "$*"; }
@@ -31,228 +23,221 @@ ok() { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+usage() {
+  cat <<'EOF'
+Usage: scripts/prepare-alvr.sh [--rebuild] [--check-source] [--check-source-control]
+
+Validates the source-controlled vendored ALVR/ALVRClient deltas and builds
+derived artifacts:
+  - visionos-app/ALVRClient/ALVRClientCore.xcframework
+  - mac-host/Vendor/ALVRServerCore/alvr_server_core.h
+  - mac-host/Vendor/ALVRServerCore/libalvr_server_core.dylib
+
+Options:
+  --rebuild               Rebuild artifacts even if the stamp matches.
+  --check-source          Validate required vendored source deltas only; skip builds.
+                          This mode allows dirty local development.
+  --check-source-control  Pre-ship check: validate deltas, then fail if
+                          visionos-app or visionos-app/ALVR has dirty/untracked
+                          source or unrecorded submodule pointers.
+  -h, --help              Show this help.
+
+This script does not patch or rewrite tracked ALVRClient/ALVR source. Signing,
+bundle identifier, entitlement, and Xcode project changes must be made as
+deliberate source changes, Xcode UI changes, or command-line build settings.
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --rebuild) REBUILD=1 ;;
+    --check-source|--validate-source) CHECK_SOURCE_ONLY=1 ;;
+    --check-source-control) CHECK_SOURCE_ONLY=1; CHECK_SOURCE_CONTROL=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
 step "Checking host prerequisites"
 command -v git >/dev/null 2>&1 || die "git not found"
 command -v python3 >/dev/null 2>&1 || die "python3 not found"
-command -v cargo >/dev/null 2>&1 || die "cargo not found; run rustup-init -y"
-command -v rustup >/dev/null 2>&1 || die "rustup not found; run rustup-init -y"
-command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found; install Xcode 26+"
-if [[ -z "$TEAM_ID" ]]; then
-  warn "VISIONCRAFT_DEVELOPMENT_TEAM is unset; generated AVP project signing team will be blank"
+if [[ $CHECK_SOURCE_ONLY -eq 0 ]]; then
+  command -v cargo >/dev/null 2>&1 || die "cargo not found; run rustup-init -y"
+  command -v rustup >/dev/null 2>&1 || die "rustup not found; run rustup-init -y"
+  command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found; install Xcode 26+"
+  ok "core prerequisites present"
+else
+  ok "source validation prerequisites present"
 fi
-ok "core prerequisites present"
 
-step "Initializing ALVR submodules"
-git -C "$REPO_ROOT" submodule update --init visionos-app
+if [[ $CHECK_SOURCE_ONLY -eq 0 ]]; then
+  step "Initializing ALVR submodules"
+  git -C "$REPO_ROOT" submodule update --init visionos-app
+  [[ -d "$ALVR_VISIONOS/.git" || -f "$ALVR_VISIONOS/.git" ]] \
+    || die "visionos-app must be the alvr-visionos submodule"
+  git -C "$ALVR_VISIONOS" submodule update --init --recursive
+else
+  step "Checking vendored ALVR checkout"
+fi
 [[ -d "$ALVR_VISIONOS/.git" || -f "$ALVR_VISIONOS/.git" ]] \
-  || die "visionos-app must be the alvr-visionos submodule"
-git -C "$ALVR_VISIONOS" submodule update --init --recursive
+  || die "visionos-app is missing; run: git submodule update --init --recursive visionos-app"
 [[ -d "$ALVR_TREE/.git" || -f "$ALVR_TREE/.git" ]] \
-  || die "visionos-app/ALVR nested submodule did not initialize"
+  || die "visionos-app/ALVR is missing; run: git -C visionos-app submodule update --init --recursive"
 [[ -f "$ALVR_VISIONOS/ALVRClient.xcodeproj/project.pbxproj" ]] \
   || die "visionos-app is missing ALVRClient.xcodeproj"
 
-step "Applying local ALVR compatibility patches"
-python3 - "$REPO_ROOT" "$TEAM_ID" "$CLIENT_BUNDLE_ID" <<'PY'
+step "Checking local signing configuration"
+if [[ -n "${VISIONCRAFT_DEVELOPMENT_TEAM:-}" || -n "${VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID:-}" ]]; then
+  warn "prepare-alvr no longer rewrites tracked ALVRClient signing or bundle settings"
+  info "Use Xcode, a deliberate project source change, or command-line build settings for target-level signing values"
+fi
+if [[ -f "$ALVR_VISIONOS/Override.xcconfig" ]]; then
+  ok "local headset Override.xcconfig present and ignored by git"
+  info "target-level Xcode build settings still override matching xcconfig values"
+else
+  info "no local headset Override.xcconfig; tracked Xcode target signing settings will be used"
+fi
+
+step "Validating vendored ALVR source deltas"
+python3 - "$REPO_ROOT" "$ALVR_VISIONOS" <<'PY'
 import pathlib
-import re
 import sys
 
 repo = pathlib.Path(sys.argv[1])
-team_id = sys.argv[2]
-client_bundle_id = sys.argv[3]
+root = pathlib.Path(sys.argv[2])
+contains_checks = [
+    ("ALVRClient/Entry/Entry.swift", "VisionCraft headset setup panel", "VisionCraftSetupPanel"),
+    ("ALVRClient/Entry/EntryControls.swift", "VisionCraft entry flow guidance", "Waiting for VisionCraftHost"),
+    ("ALVRClient/WorldTracker.swift", "ARKit startup fallback", "ARKit failed to start"),
+    ("ALVRClient/WorldTracker.swift", "personal-team accessory tracking gate", "XCODE_BETA_26 && VISIONCRAFT_ENABLE_ACCESSORY_TRACKING"),
+    ("ALVRClient/EventHandler.swift", "stable headset discovery listener", "mdnsListener != nil && mdnsListenerRegistered && mdnsListenerReady && !streamingActive"),
+    ("ALVRClient/Info.plist", "local network usage description", "VisionCraft uses the local network"),
+    ("ALVRClient/EventHandler.swift", "decoder config fallback", "Missing decoder config; trying to create decoder"),
+    ("ALVRClient/Renderer.swift", "renderer frame reuse fallback", "if queuedFrame == nil, let lastQueuedFrame = EventHandler.shared.lastQueuedFrame"),
+    ("ALVR/alvr/server_core/src/connection.rs", "PSVR2 controller reset profile", "ControllersEmulationMode::PSVR2Sense => 30,"),
+    ("ALVR/alvr/server_core/src/connection.rs", "raw ALVR button event forwarding", "ServerCoreEvent::RawButtons("),
+    ("ALVR/alvr/server_core/src/lib.rs", "raw button server_core event", "RawButtons(Vec<ButtonEntry>)"),
+    ("ALVR/alvr/server_core/src/c_api.rs", "raw button C API queue", "RAW_BUTTONS_QUEUE"),
+    ("ALVR/alvr/server_core/src/c_api.rs", "raw button C API event", "RawButtonsUpdated"),
+    ("ALVR/alvr/server_core/src/c_api.rs", "raw button C API getter", "alvr_get_raw_buttons"),
+    ("ALVR/alvr/server_core/src/input_mapping.rs", "PSVR2 input mapping profile", "ControllersEmulationMode::PSVR2Sense => CONTROLLER_PROFILE_INFO"),
+    ("ALVR/alvr/session/src/settings.rs", "VisionCraft default refresh rate", "preferred_fps: 90."),
+    ("ALVR/alvr/session/src/settings.rs", "VisionCraft default codec", "variant: CodecTypeDefaultVariant::Hevc"),
+    ("ALVR/alvr/session/src/settings.rs", "foveated encoding disabled for uniform frames", "foveated_encoding: SwitchDefault {\n                enabled: false,"),
+    ("ALVR/alvr/session/src/settings.rs", "game audio disabled by default", "game_audio: SwitchDefault {\n                enabled: false,"),
+]
+absent_checks = [
+    ("ALVRClient/ALVRClient.entitlements", "personal-team ALVRClient entitlements", "com.apple.developer"),
+    ("ALVREyeBroadcast/ALVREyeBroadcast.entitlements", "personal-team eye broadcast entitlements", "com.apple.developer"),
+]
 
-def replace_if_present(text: str, old: str, new: str) -> str:
-    return text.replace(old, new) if old in text else text
+missing = []
+for relative, label, needle in contains_checks:
+    path = root / relative
+    if not path.exists():
+        missing.append((relative, label, "file is missing"))
+        continue
+    if needle not in path.read_text():
+        missing.append((relative, label, f"missing sentinel: {needle!r}"))
+for relative, label, needle in absent_checks:
+    path = root / relative
+    if not path.exists():
+        missing.append((relative, label, "file is missing"))
+        continue
+    if needle in path.read_text():
+        missing.append((relative, label, f"unexpected restricted entitlement sentinel: {needle!r}"))
 
-project = repo / "visionos-app" / "ALVRClient.xcodeproj" / "project.pbxproj"
-text = project.read_text()
-team_assignment = f"DEVELOPMENT_TEAM = {team_id};" if team_id else "DEVELOPMENT_TEAM = \"\";"
-replacements = {
-    "PRODUCT_BUNDLE_IDENTIFIER = alvr.client;": f"PRODUCT_BUNDLE_IDENTIFIER = {client_bundle_id};",
-    "PRODUCT_BUNDLE_IDENTIFIER = alvr.client.ALVREyeBroadcast;": f"PRODUCT_BUNDLE_IDENTIFIER = {client_bundle_id}.ALVREyeBroadcast;",
-}
-for old, new in replacements.items():
-    text = text.replace(old, new)
-text = re.sub(r"DEVELOPMENT_TEAM = [A-Z0-9\"]*;", team_assignment, text)
-project.write_text(text)
+patch_artifacts = [repo / "scripts" / "patches" / "alvrclient-visioncraft-ui.patch"]
+for path in patch_artifacts:
+    if path.exists():
+        missing.append((str(path.relative_to(repo)), "retired ALVRClient patch artifact", "patch file must not be source of truth"))
 
-xcconfig = repo / "visionos-app" / "ALVRClient.xcconfig"
-text = xcconfig.read_text()
-text = re.sub(r"^DEVELOPMENT_TEAM = .*$", f"DEVELOPMENT_TEAM = {team_id}", text, flags=re.MULTILINE)
-text = re.sub(r"^PRODUCT_BUNDLE_IDENTIFIER = .*$", f"PRODUCT_BUNDLE_IDENTIFIER = {client_bundle_id}", text, flags=re.MULTILINE)
-xcconfig.write_text(text)
-
-connection = repo / "visionos-app" / "ALVR" / "alvr" / "server_core" / "src" / "connection.rs"
-text = connection.read_text()
-needle = "            ControllersEmulationMode::Pico4 => 10,\n            ControllersEmulationMode::ValveIndex => 20,"
-if needle in text:
-    text = text.replace(
-        needle,
-        "            ControllersEmulationMode::Pico4 => 10,\n"
-        "            ControllersEmulationMode::PSVR2Sense => 30,\n"
-        "            ControllersEmulationMode::ValveIndex => 20,"
+if missing:
+    print("error: required VisionCraft vendored ALVR source deltas are missing:", file=sys.stderr)
+    for relative, label, reason in missing:
+        print(f"  - {label} ({relative}): {reason}", file=sys.stderr)
+    print(
+        "\nVisionCraft ALVR changes must be committed directly under visionos-app/.\n"
+        "Reapply/review the missing delta against the pinned upstream source, commit it directly,\n"
+        "then rerun scripts/prepare-alvr.sh. For review/audit, use:\n"
+        "  scripts/prepare-alvr.sh --check-source\n"
+        "  git -C visionos-app diff -- ALVRClient ALVREyeBroadcast ALVRClient.xcodeproj ALVR\n"
+        "  git -C visionos-app/ALVR diff -- alvr/server_core alvr/session",
+        file=sys.stderr,
     )
-if "ButtonEntry, ClientConnectionResult" not in text:
-    text = replace_if_present(
-        text,
-        "    ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics,\n",
-        "    ButtonEntry, ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics,\n",
-    )
-raw_buttons_send = (
-    "                        ctx.events_sender\n"
-    "                            .send(ServerCoreEvent::RawButtons(\n"
-    "                                entries\n"
-    "                                    .iter()\n"
-    "                                    .map(|entry| ButtonEntry {\n"
-    "                                        path_id: entry.path_id,\n"
-    "                                        value: entry.value,\n"
-    "                                    })\n"
-    "                                    .collect(),\n"
-    "                            ))\n"
-    "                            .ok();\n"
-)
-text = replace_if_present(
-    text,
-    "                        ctx.events_sender\n"
-    "                            .send(ServerCoreEvent::RawButtons(entries.clone()))\n"
-    "                            .ok();\n",
-    raw_buttons_send,
-)
-if "ServerCoreEvent::RawButtons(" not in text:
-    text = replace_if_present(
-        text,
-        "                    ClientControlPacket::Buttons(entries) => {\n"
-        "                        {\n",
-        "                    ClientControlPacket::Buttons(entries) => {\n"
-        f"{raw_buttons_send}"
-        "\n"
-        "                        {\n",
-    )
-connection.write_text(text)
-
-server_core_lib = repo / "visionos-app" / "ALVR" / "alvr" / "server_core" / "src" / "lib.rs"
-text = server_core_lib.read_text()
-if "RawButtons(Vec<ButtonEntry>)" not in text:
-    text = replace_if_present(
-        text,
-        "    Buttons(Vec<ButtonEntry>), // Note: this is after mapping\n",
-        "    RawButtons(Vec<ButtonEntry>),\n"
-        "    Buttons(Vec<ButtonEntry>), // Note: this is after mapping\n",
-    )
-server_core_lib.write_text(text)
-
-c_api = repo / "visionos-app" / "ALVR" / "alvr" / "server_core" / "src" / "c_api.rs"
-text = c_api.read_text()
-if "RAW_BUTTONS_QUEUE" not in text:
-    text = replace_if_present(
-        text,
-        "static BUTTONS_QUEUE: Lazy<Mutex<VecDeque<Vec<ButtonEntry>>>> =\n"
-        "    Lazy::new(|| Mutex::new(VecDeque::new()));\n",
-        "static BUTTONS_QUEUE: Lazy<Mutex<VecDeque<Vec<ButtonEntry>>>> =\n"
-        "    Lazy::new(|| Mutex::new(VecDeque::new()));\n"
-        "static RAW_BUTTONS_QUEUE: Lazy<Mutex<VecDeque<Vec<ButtonEntry>>>> =\n"
-        "    Lazy::new(|| Mutex::new(VecDeque::new()));\n",
-    )
-if "RawButtonsUpdated" not in text:
-    text = replace_if_present(
-        text,
-        "    ButtonsUpdated,\n",
-        "    RawButtonsUpdated,\n"
-        "    ButtonsUpdated,\n",
-    )
-if "ServerCoreEvent::RawButtons(entries)" not in text:
-    text = replace_if_present(
-        text,
-        "                ServerCoreEvent::Buttons(entries) => {\n"
-        "                    BUTTONS_QUEUE.lock().push_back(entries);\n"
-        "                    *out_event = AlvrEvent::ButtonsUpdated;\n"
-        "                }\n",
-        "                ServerCoreEvent::RawButtons(entries) => {\n"
-        "                    RAW_BUTTONS_QUEUE.lock().push_back(entries);\n"
-        "                    *out_event = AlvrEvent::RawButtonsUpdated;\n"
-        "                }\n"
-        "                ServerCoreEvent::Buttons(entries) => {\n"
-        "                    BUTTONS_QUEUE.lock().push_back(entries);\n"
-        "                    *out_event = AlvrEvent::ButtonsUpdated;\n"
-        "                }\n",
-    )
-if "fn alvr_get_buttons_from_queue" not in text:
-    text = replace_if_present(
-        text,
-        "pub unsafe extern \"C\" fn alvr_get_buttons(out_entries: *mut AlvrButtonEntry) -> u64 {\n"
-        "    let entries_count = BUTTONS_QUEUE.lock().front().map_or(0, |e| e.len()) as u64;\n",
-        "pub unsafe extern \"C\" fn alvr_get_buttons(out_entries: *mut AlvrButtonEntry) -> u64 {\n"
-        "    alvr_get_buttons_from_queue(out_entries, &BUTTONS_QUEUE)\n"
-        "}\n"
-        "\n"
-        "/// Call with null out_entries to get the buffer length.\n"
-        "/// Call with non-null out_entries to get raw client buttons and advance the internal queue.\n"
-        "#[no_mangle]\n"
-        "pub unsafe extern \"C\" fn alvr_get_raw_buttons(out_entries: *mut AlvrButtonEntry) -> u64 {\n"
-        "    alvr_get_buttons_from_queue(out_entries, &RAW_BUTTONS_QUEUE)\n"
-        "}\n"
-        "\n"
-        "unsafe fn alvr_get_buttons_from_queue(\n"
-        "    out_entries: *mut AlvrButtonEntry,\n"
-        "    queue: &Mutex<VecDeque<Vec<ButtonEntry>>>,\n"
-        ") -> u64 {\n"
-        "    let entries_count = queue.lock().front().map_or(0, |e| e.len()) as u64;\n",
-    )
-    text = replace_if_present(text, "    if let Some(button_entries) = BUTTONS_QUEUE.lock().pop_front() {\n", "    if let Some(button_entries) = queue.lock().pop_front() {\n")
-c_api.write_text(text)
-
-mapping = repo / "visionos-app" / "ALVR" / "alvr" / "server_core" / "src" / "input_mapping.rs"
-text = mapping.read_text()
-needle = (
-    "        | ControllersEmulationMode::Quest3Plus\n"
-    "        | ControllersEmulationMode::QuestPro => CONTROLLER_PROFILE_INFO"
-)
-if needle in text:
-    text = text.replace(
-        needle,
-        "        | ControllersEmulationMode::Quest3Plus\n"
-        "        | ControllersEmulationMode::QuestPro\n"
-        "        | ControllersEmulationMode::PSVR2Sense => CONTROLLER_PROFILE_INFO"
-    )
-mapping.write_text(text)
-
-settings = repo / "visionos-app" / "ALVR" / "alvr" / "session" / "src" / "settings.rs"
-text = settings.read_text()
-text = text.replace("            preferred_fps: 72.,", "            preferred_fps: 90.,")
-text = text.replace(
-    "            preferred_codec: CodecTypeDefault {\n"
-    "                variant: CodecTypeDefaultVariant::H264,\n"
-    "            },",
-    "            preferred_codec: CodecTypeDefault {\n"
-    "                variant: CodecTypeDefaultVariant::Hevc,\n"
-    "            },",
-)
-text = text.replace(
-    "            foveated_encoding: SwitchDefault {\n"
-    "                enabled: true,",
-    "            foveated_encoding: SwitchDefault {\n"
-    "                enabled: false,",
-)
-text = text.replace(
-    "            game_audio: SwitchDefault {\n"
-    "                enabled: true,",
-    "            game_audio: SwitchDefault {\n"
-    "                enabled: false,",
-)
-settings.write_text(text)
+    sys.exit(1)
 PY
-ok "patched signing, server_core compile gap, and VisionCraft ALVR defaults"
+ok "vendored ALVR source deltas present"
 
-ui_patch="$REPO_ROOT/scripts/patches/alvrclient-visioncraft-ui.patch"
-step "Applying VisionCraft ALVRClient UI patch"
-if git -C "$ALVR_VISIONOS" apply --check "$ui_patch"; then
-  git -C "$ALVR_VISIONOS" apply "$ui_patch"
-  ok "VisionCraft headset onboarding patch applied"
-elif git -C "$ALVR_VISIONOS" apply -R --check "$ui_patch"; then
-  ok "VisionCraft headset onboarding patch already applied"
-else
-  die "VisionCraft ALVRClient UI patch no longer applies cleanly"
+check_clean_git_tree() {
+  local label="$1"
+  local dir="$2"
+  local status
+  status="$(git -C "$dir" status --porcelain=v1 --untracked-files=all)"
+  if [[ -n "$status" ]]; then
+    printf 'error: %s has uncommitted or untracked source changes:\n' "$label" >&2
+    printf '%s\n' "$status" >&2
+    return 1
+  fi
+}
+
+git_tree_object() {
+  local dir="$1"
+  local path="$2"
+  git -C "$dir" ls-tree HEAD -- "$path" | awk '{ print $3; exit }'
+}
+
+check_recorded_submodule_pointer() {
+  local parent_label="$1"
+  local parent_dir="$2"
+  local submodule_path="$3"
+  local child_dir="$4"
+  local expected actual
+  expected="$(git_tree_object "$parent_dir" "$submodule_path")"
+  actual="$(git -C "$child_dir" rev-parse HEAD)"
+  if [[ -z "$expected" ]]; then
+    printf 'error: %s does not record submodule path %s\n' "$parent_label" "$submodule_path" >&2
+    return 1
+  fi
+  if [[ "$expected" != "$actual" ]]; then
+    printf 'error: %s records %s at %s, but checkout is at %s\n' "$parent_label" "$submodule_path" "$expected" "$actual" >&2
+    return 1
+  fi
+}
+
+check_vendored_source_control() {
+  local fail=0
+  step "Checking vendored ALVR source-control state"
+
+  check_clean_git_tree "visionos-app" "$ALVR_VISIONOS" || fail=1
+  check_clean_git_tree "visionos-app/ALVR" "$ALVR_TREE" || fail=1
+  check_recorded_submodule_pointer "parent repo" "$REPO_ROOT" "visionos-app" "$ALVR_VISIONOS" || fail=1
+  check_recorded_submodule_pointer "visionos-app" "$ALVR_VISIONOS" "ALVR" "$ALVR_TREE" || fail=1
+
+  if [[ $fail -ne 0 ]]; then
+    printf '%s\n' >&2
+    printf 'This is expected during active vendored ALVR development, but it is not shippable.\n' >&2
+    printf 'Before shipping, commit vendored source changes in visionos-app and visionos-app/ALVR,\n' >&2
+    printf 'then record the resulting submodule pointers in their parent repositories.\n' >&2
+    printf 'For local dirty development, use: scripts/prepare-alvr.sh --check-source\n' >&2
+    return 1
+  fi
+
+  ok "vendored ALVR source-control state is clean and recorded"
+}
+
+if [[ $CHECK_SOURCE_ONLY -eq 1 ]]; then
+  if [[ $CHECK_SOURCE_CONTROL -eq 1 ]]; then
+    check_vendored_source_control
+  fi
+  step "Source-control audit commands"
+  info "git submodule status --recursive visionos-app"
+  info "git -C visionos-app status --short"
+  info "git -C visionos-app/ALVR status --short"
+  info "git -C visionos-app diff -- ALVRClient ALVREyeBroadcast ALVRClient.xcodeproj ALVR"
+  info "git -C visionos-app/ALVR diff -- alvr/server_core alvr/session"
+  ok "source validation complete"
+  exit 0
 fi
 
 step "Checking Rust tools"
@@ -269,11 +254,11 @@ artifact_stamp="$HOST_VENDOR/.alvr-artifacts.stamp"
 alvr_commit="$(git -C "$ALVR_TREE" rev-parse HEAD)"
 expected_stamp="$(
   printf 'alvr_commit=%s\n' "$alvr_commit"
-  printf 'patch_version=%s\n' "$PATCH_VERSION"
+  printf 'source_version=%s\n' "$ARTIFACT_SOURCE_VERSION"
 )"
 current_stamp=""
 if [[ -f "$artifact_stamp" ]]; then
-  current_stamp="$(grep -E '^(alvr_commit|patch_version)=' "$artifact_stamp" || true)"
+  current_stamp="$(grep -E '^(alvr_commit|source_version)=' "$artifact_stamp" || true)"
 fi
 needs_rebuild=0
 if [[ $REBUILD -eq 1 || ! -d "$client_artifact" || ! -f "$server_header" || ! -f "$server_dylib" || "$current_stamp" != "$expected_stamp" ]]; then
@@ -316,7 +301,6 @@ fi
 mkdir -p "$HOST_VENDOR"
 printf '%s\n' "$expected_stamp" > "$artifact_stamp"
 
-info "client bundle id: $CLIENT_BUNDLE_ID"
 info "server header: $server_header"
 info "server dylib: $server_dylib"
 ok "ALVR preparation complete"

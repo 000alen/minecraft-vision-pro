@@ -33,7 +33,7 @@ xcodebuild -project VisionCraftHost.xcodeproj -scheme VisionCraftHost CODE_SIGNI
 1. Run `scripts/vc.sh package-beta` from the repo root if you want a local beta bundle under `.run/beta`.
 2. Run `scripts/vc.sh host` from the repo root, or open `.run/beta/Host/VisionCraftHost.app`.
 3. Run the ALVR client from `visionos-app/ALVRClient.xcodeproj` on Apple Vision Pro.
-4. Start Minecraft with the Apple provider, or run `scripts/vc.sh sender` for the deterministic test pattern.
+4. Start Minecraft with the Apple provider, or run `scripts/vc.sh test-sender` (`sender`) for the deterministic test pattern.
 5. Use `scripts/vc.sh verify` to confirm ALVR is connected and frames are advancing.
 
 The host window includes guided cards for setup artifacts, bridge state, headset connection, frame source, and diagnostics. If it reports missing artifacts, run:

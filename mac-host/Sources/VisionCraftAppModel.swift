@@ -20,6 +20,8 @@ final class VisionCraftAppModel {
     var alvrTargetEyeWidth = 0
     var alvrTargetEyeHeight = 0
     var framesEncoded: UInt64 = 0
+    var alvrLastTrackingTimestampNs: UInt64 = 0
+    var alvrLastVideoTimestampNs: UInt64 = 0
 
     let bridgeServer = JavaBridgeServer()
     let controlApiServer = ControlApiServer()
@@ -62,7 +64,7 @@ final class VisionCraftAppModel {
             return "On the headset, run ALVRClient from Xcode or your beta install, then allow permissions."
         }
         if framesEncoded == 0 {
-            return "Run scripts/vc.sh sender for a test pattern, or scripts/vc.sh mc and press F7 in Minecraft."
+            return "Run scripts/vc.sh synthetic first. If ALVR-only frames work, then try scripts/vc.sh sender or scripts/vc.sh mc + F7."
         }
         return "Use scripts/vc.sh verify if you want a terminal health check."
     }
@@ -136,18 +138,23 @@ final class VisionCraftAppModel {
             Task { @MainActor in self?.diagnosticText = status }
         }
         alvr.onClientConnectionChange = { [weak self] connected in
+            let session: BridgeSessionState = connected ? .ready : .closed
+            self?.bridgeServer.broadcastSession(session)
             Task { @MainActor in
                 guard let self else { return }
                 self.alvrClientConnected = connected
                 self.posePublisher.setSuppressLocalPose(connected)
                 self.posePublisher.setSuppressLocalViewConfig(connected)
-                self.sessionState = connected ? .ready : .closed
-                self.bridgeServer.broadcastSession(connected ? .ready : .closed)
+                self.sessionState = session
+                self.framesEncoded = 0
+                self.alvrFramesSent = 0
                 self.diagnosticText = connected ? "ALVR headset connected" : "ALVR headset disconnected"
             }
         }
         alvr.start(enableSyntheticFrames: enableSyntheticFrames)
         alvrRunning = true
+        framesEncoded = 0
+        alvrFramesSent = 0
         refreshAlvrStats()
     }
 
@@ -155,6 +162,8 @@ final class VisionCraftAppModel {
         alvr.stop()
         alvrRunning = false
         alvrClientConnected = false
+        framesEncoded = 0
+        alvrFramesSent = 0
         posePublisher.setSuppressLocalPose(false)
         posePublisher.setSuppressLocalViewConfig(false)
         sessionState = .closed
@@ -170,6 +179,8 @@ final class VisionCraftAppModel {
         alvrFramesSent = snapshot.framesSent
         alvrTargetEyeWidth = snapshot.targetEyeWidth
         alvrTargetEyeHeight = snapshot.targetEyeHeight
+        alvrLastTrackingTimestampNs = snapshot.lastTrackingSampleTimestampNs
+        alvrLastVideoTimestampNs = snapshot.lastVideoTargetTimestampNs
     }
 
     private func handleControlRequest(_ request: ControlApiServer.Request) async -> ControlApiServer.Response {
@@ -204,7 +215,7 @@ final class VisionCraftAppModel {
     private func statusJson() -> String {
         refreshAlvrStats()
         return """
-        {"ok":true,"pipeline_ready":\(pipelineReady),"bridge_running":\(bridgeRunning),"bridge_port":\(bridgePort),"control_port":\(controlPort),"alvr_running":\(alvrRunning),"alvr_client_connected":\(alvrClientConnected),"alvr_frames_sent":\(alvrFramesSent),"alvr_target_eye_width":\(alvrTargetEyeWidth),"alvr_target_eye_height":\(alvrTargetEyeHeight),"frames_encoded":\(framesEncoded),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),"diagnostic":"\(Self.escapeJson(diagnosticText))","next_step":"\(Self.escapeJson(nextStepTitle))"}
+        {"ok":true,"pipeline_ready":\(pipelineReady),"bridge_running":\(bridgeRunning),"bridge_port":\(bridgePort),"control_port":\(controlPort),"alvr_running":\(alvrRunning),"alvr_client_connected":\(alvrClientConnected),"alvr_frames_sent":\(alvrFramesSent),"alvr_target_eye_width":\(alvrTargetEyeWidth),"alvr_target_eye_height":\(alvrTargetEyeHeight),"alvr_last_tracking_timestamp_ns":\(alvrLastTrackingTimestampNs),"alvr_last_video_timestamp_ns":\(alvrLastVideoTimestampNs),"frames_encoded":\(framesEncoded),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),"diagnostic":"\(Self.escapeJson(diagnosticText))","next_step":"\(Self.escapeJson(nextStepTitle))"}
         """
     }
 
@@ -215,7 +226,7 @@ final class VisionCraftAppModel {
     }
 
     func openRunbook() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "\(Self.repoRootPath())/docs/runbook.md"))
+        NSWorkspace.shared.open(URL(fileURLWithPath: "\(Self.repoRootPath())/docs/alvr-hardware-playbook.md"))
     }
 
     func revealBetaBundle() {

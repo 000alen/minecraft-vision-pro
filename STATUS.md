@@ -1,8 +1,9 @@
 # VisionCraft status
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
-> Current runtime path: `VisionCraftHost` + ALVR `server_core` + vendored `ALVRClient`.
+> Current runtime path: Mac ALVR host (`VisionCraftHost`) + ALVR `server_core` + VisionCraft headset client (`ALVRClient`).
+> Source-control model: the vendored ALVR version and VisionCraft ALVR changes live under `visionos-app/`; prepare scripts validate/build artifacts only.
 > Older notes about RemoteImmersiveSpace / custom companion relay are historical only.
 
 ## Current beta flow
@@ -10,9 +11,11 @@ Last updated: 2026-06-01
 ```bash
 scripts/vc.sh bootstrap
 scripts/vc.sh package-beta
-scripts/vc.sh host --rebuild
-scripts/vc.sh alvr-client
-scripts/vc.sh sender   # or scripts/vc.sh mc, then press F7
+scripts/vc.sh host --rebuild --synthetic
+scripts/vc.sh headset
+scripts/vc.sh verify   # ALVR-only synthetic stream
+scripts/vc.sh test-sender
+scripts/vc.sh minecraft # press F7 for Minecraft
 scripts/vc.sh verify
 ```
 
@@ -32,24 +35,33 @@ Current OOTB work focuses on a packaged local beta: self-checking scripts, a gui
 
 ## What works in repo today
 
-- Vendored VivecraftMod with Apple Vision backend
-- TCP bridge protocol v1 + metrics
+- Vendored Vivecraft Apple provider
+- Bridge v1 loopback protocol + metrics
 - **`MockVisionCraftHost`** — headless M1 server (no Mac/AVP)
 - **CI integration tests** — stereo frame + pose round-trip on every push
-- VisionCraftHost Swift app (compositor + bridge server + loopback control API)
+- Mac ALVR host Swift app (ALVR `server_core` + Bridge v1 server + loopback control API)
 - Comfort defaults (seated, HMD aim, fake controllers for crosshair)
 - OpenVR `create()` skip on Apple Vision path
 
 ## Hardware validation checklist
 
 ```bash
-scripts/vc.sh host --rebuild
-scripts/vc.sh alvr-client
-scripts/vc.sh sender
+scripts/vc.sh host --rebuild --synthetic
+scripts/vc.sh headset
+scripts/vc.sh verify
+scripts/vc.sh observe 30
+scripts/vc.sh test-sender
 scripts/vc.sh verify
 ```
 
-Then validate Minecraft with `scripts/vc.sh mc`, press F7, and run the controller checklist in `docs/runbook.md`.
+Synthetic frames prove host -> ALVR -> AVP without Java or Minecraft. Then validate the test-pattern sender with `scripts/vc.sh test-sender`, then Minecraft with `scripts/vc.sh minecraft`, press F7, and run the controller checklist in `docs/runbook.md`.
+
+## 2026-06-02 hardware hardening findings
+
+- `scripts/vc.sh host` intentionally runs `clean`, so it kills any Java sender or Minecraft frame source. Use `scripts/vc.sh synthetic` on an already-running host when isolating ALVR after a frame source is active.
+- Host video config recovery is deliberate: `AlvrServerCoordinator` sends VPS/SPS/PPS through ALVR decoder config and keeps them inline on IDR frames so ALVRClient can recreate VideoToolbox state after a decoder reset.
+- ALVRClient now falls back to creating a VideoToolbox decoder from incoming IDR NALs when the decoder config event is missed or arrives out of order.
+- Every hardware report should include `.run/observability/<timestamp>/` from `scripts/vc.sh observe 30`; use `scripts/vc.sh avp-console 120` when Xcode console output matters.
 
 ## Latest M0 preflight
 

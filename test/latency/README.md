@@ -1,6 +1,6 @@
 # Latency integration tests
 
-Run on Mac with VisionCraftHost + bridge-test:
+Run on Mac with VisionCraftHost + the test-pattern sender (`:bridge-test`, under `bridge/java/test-pattern-sender/`):
 
 ```bash
 ./gradlew :bridge-test:run

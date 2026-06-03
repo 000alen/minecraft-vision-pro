@@ -1,7 +1,8 @@
-# Apple spatial rendering notes
+# Legacy Apple Spatial Rendering Notes
 
-> Retired design notes: the current path uses ALVRClient + `alvr_server_core`, not the custom
-> macOS `RemoteImmersiveSpace` compositor. Keep this file as historical research context only.
+> Legacy only. The current Apple path uses the VisionCraft headset client (ALVRClient) plus ALVR `server_core`, not the custom macOS `RemoteImmersiveSpace` compositor.
+>
+> Keep this file as historical research context only. Do not reintroduce this path unless explicitly requested.
 
 ## APIs (macOS 26+)
 

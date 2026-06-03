@@ -9,8 +9,8 @@ import Accelerate
 ///
 /// - Channel order: Minecraft sends **RGBA** bytes; the encoder source pixel buffer is **BGRA**, so
 ///   each eye is permuted R↔B with vImage (HW-friendly, no per-pixel Swift loop).
-/// - Orientation: **no vertical flip here.** The ALVR visionOS client samples side-by-side frames
-///   directly; this encoder preserves Minecraft's submitted row order.
+/// - Orientation: **no vertical flip here.** Java/OpenGL frames are bottom-left origin; the
+///   ALVRClient video shader performs the vertical flip at sample time.
 /// - Low latency: real-time, no frame reordering, no B-frames. Keyframes carry their parameter
 ///   sets inline so a mid-stream viewer recovers at the next IDR.
 ///
@@ -21,8 +21,19 @@ final class StereoFrameEncoder {
         let data: Data
         let keyframe: Bool
         let frameId: UInt64
+        let targetTimestampNs: UInt64
         let ptsNanos: UInt64
         /// Head orientation (ARKit world, xyzw) the frame was rendered for, or `nil` if unknown.
+        let renderOrientation: [Float]?
+    }
+
+    private struct PendingFrame {
+        let left: Data
+        let right: Data
+        let eyeWidth: Int
+        let eyeHeight: Int
+        let frameId: UInt64
+        let targetTimestampNs: UInt64
         let renderOrientation: [Float]?
     }
 
@@ -36,6 +47,8 @@ final class StereoFrameEncoder {
     private var fps: Int32 = 90
     private var frameIndex: Int64 = 0
     private var forceKeyframeNext = true
+    private var pendingFrame: PendingFrame?
+    private var encodeInFlight = false
 
     // MARK: - Lifecycle
 
@@ -58,6 +71,8 @@ final class StereoFrameEncoder {
             self.session = nil
             self.eyeWidth = 0
             self.eyeHeight = 0
+            self.pendingFrame = nil
+            self.encodeInFlight = false
         }
     }
 
@@ -65,13 +80,22 @@ final class StereoFrameEncoder {
 
     /// Pack + encode one stereo pair. `left`/`right` are RGBA8, `eyeWidth × eyeHeight` each.
     func encode(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64,
-                renderOrientation: [Float]? = nil) {
+                targetTimestampNs: UInt64, renderOrientation: [Float]? = nil) {
         // Copy out of any caller-owned/transient storage so the async work is self-contained.
-        let l = Data(left)
-        let r = Data(right)
+        let frame = PendingFrame(
+            left: Data(left),
+            right: Data(right),
+            eyeWidth: eyeWidth,
+            eyeHeight: eyeHeight,
+            frameId: frameId,
+            targetTimestampNs: targetTimestampNs,
+            renderOrientation: renderOrientation
+        )
         queue.async {
-            self.encodeLocked(left: l, right: r, eyeWidth: eyeWidth, eyeHeight: eyeHeight,
-                              frameId: frameId, renderOrientation: renderOrientation)
+            // Latest-frame-wins: if VideoToolbox is still encoding, replace any
+            // queued frame instead of building seconds of stale video latency.
+            self.pendingFrame = frame
+            self.encodeLatestPendingIfIdleLocked()
         }
     }
 
@@ -101,6 +125,9 @@ final class StereoFrameEncoder {
             kCVPixelBufferHeightKey: frameHeight,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
         ]
+        let encoderSpecification: [CFString: Any] = [
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue as Any
+        ]
 
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(
@@ -108,7 +135,7 @@ final class StereoFrameEncoder {
             width: Int32(frameWidth),
             height: Int32(frameHeight),
             codecType: kCMVideoCodecType_HEVC,
-            encoderSpecification: nil,
+            encoderSpecification: encoderSpecification as CFDictionary,
             imageBufferAttributes: sourceAttributes as CFDictionary,
             compressedDataAllocator: nil,
             outputCallback: nil,
@@ -139,21 +166,35 @@ final class StereoFrameEncoder {
         self.session = session
     }
 
+    private func encodeLatestPendingIfIdleLocked() {
+        guard !encodeInFlight, let frame = pendingFrame else { return }
+        pendingFrame = nil
+        encodeInFlight = true
+        if !encodeLocked(left: frame.left, right: frame.right, eyeWidth: frame.eyeWidth,
+                         eyeHeight: frame.eyeHeight, frameId: frame.frameId,
+                         targetTimestampNs: frame.targetTimestampNs,
+                         renderOrientation: frame.renderOrientation) {
+            encodeInFlight = false
+            encodeLatestPendingIfIdleLocked()
+        }
+    }
+
+    @discardableResult
     private func encodeLocked(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64,
-                              renderOrientation: [Float]?) {
+                              targetTimestampNs: UInt64, renderOrientation: [Float]?) -> Bool {
         if session == nil || self.eyeWidth != eyeWidth || self.eyeHeight != eyeHeight {
             configureLocked(eyeWidth: eyeWidth, eyeHeight: eyeHeight, fps: fps)
         }
         guard let session,
-              let pool = VTCompressionSessionGetPixelBufferPool(session) else { return }
+              let pool = VTCompressionSessionGetPixelBufferPool(session) else { return false }
 
         let bytesPerEyeRow = eyeWidth * 4
         guard left.count >= bytesPerEyeRow * eyeHeight,
-              right.count >= bytesPerEyeRow * eyeHeight else { return }
+              right.count >= bytesPerEyeRow * eyeHeight else { return false }
 
         var pixelBuffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer) == kCVReturnSuccess,
-              let pb = pixelBuffer else { return }
+              let pb = pixelBuffer else { return false }
 
         CVPixelBufferLockBaseAddress(pb, [])
         if let base = CVPixelBufferGetBaseAddress(pb) {
@@ -192,7 +233,7 @@ final class StereoFrameEncoder {
         }
 
         let ptsNanos = UInt64(Date().timeIntervalSince1970 * 1_000_000_000)
-        VTCompressionSessionEncodeFrame(
+        let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pb,
             presentationTimeStamp: pts,
@@ -200,16 +241,23 @@ final class StereoFrameEncoder {
             frameProperties: frameProperties as CFDictionary?,
             infoFlagsOut: nil
         ) { [weak self] status, _, sample in
-            guard let self, status == noErr, let sample else { return }
+            guard let self else { return }
             self.queue.async {
-                self.handleEncoded(sample: sample, frameId: frameId, ptsNanos: ptsNanos,
+                defer {
+                    self.encodeInFlight = false
+                    self.encodeLatestPendingIfIdleLocked()
+                }
+                guard status == noErr, let sample else { return }
+                self.handleEncoded(sample: sample, frameId: frameId,
+                                   targetTimestampNs: targetTimestampNs, ptsNanos: ptsNanos,
                                    renderOrientation: renderOrientation)
             }
         }
+        return status == noErr
     }
 
-    private func handleEncoded(sample: CMSampleBuffer, frameId: UInt64, ptsNanos: UInt64,
-                               renderOrientation: [Float]?) {
+    private func handleEncoded(sample: CMSampleBuffer, frameId: UInt64, targetTimestampNs: UInt64,
+                               ptsNanos: UInt64, renderOrientation: [Float]?) {
         guard CMSampleBufferDataIsReady(sample) else { return }
 
         let keyframe = Self.isKeyframe(sample)
@@ -246,7 +294,8 @@ final class StereoFrameEncoder {
         }
 
         guard !au.isEmpty else { return }
-        onAccessUnit?(AccessUnit(data: au, keyframe: keyframe, frameId: frameId, ptsNanos: ptsNanos,
+        onAccessUnit?(AccessUnit(data: au, keyframe: keyframe, frameId: frameId,
+                                 targetTimestampNs: targetTimestampNs, ptsNanos: ptsNanos,
                                  renderOrientation: renderOrientation))
     }
 

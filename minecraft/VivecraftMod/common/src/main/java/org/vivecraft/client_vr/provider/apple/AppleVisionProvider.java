@@ -31,6 +31,9 @@ public class AppleVisionProvider extends MCVR {
     private static AppleVisionProvider instance;
 
     private static final float CROSSHAIR_FORWARD_BLOCKS = 0.75f;
+    private static final long RECONNECT_INTERVAL_NS = 1_000_000_000L;
+    private static final int RECONNECT_TIMEOUT_MS = 250;
+    private static final long STALE_HAND_INPUT_NS = 250_000_000L;
 
     // Pinch → mouse hysteresis: engage on a firm pinch, hold until clearly released, so a
     // hand hovering near the threshold can't chatter the attack/use action.
@@ -48,6 +51,8 @@ public class AppleVisionProvider extends MCVR {
     private final AppleInputProvider inputProvider = new AppleInputProvider(bridge);
     private AppleFrameSubmitter frameSubmitter;
     private boolean vrActive = true;
+    private long nextReconnectAttemptNs = 0L;
+    private boolean bridgeWasDisconnected = false;
 
     public AppleVisionProvider(Minecraft mc, ClientDataHolderVR dh) {
         super(mc, dh, VivecraftVRMod.INSTANCE);
@@ -148,6 +153,7 @@ public class AppleVisionProvider extends MCVR {
         if (!this.initialized) {
             return;
         }
+        ensureBridgeConnected();
         sessionState.updateFromBridge(bridge);
         Profiler.get().push("applePose");
         poseProvider.poll();
@@ -190,10 +196,34 @@ public class AppleVisionProvider extends MCVR {
     @Override
     public void processInputs() {
         this.ignorePressesNextFrame = false;
-        if (inputProvider.hasSeenControllerState()) {
+        if (inputProvider.hasFreshControllerState()) {
             releasePinchFallbacks();
         } else {
             updateHandPinch();
+        }
+    }
+
+    private void ensureBridgeConnected() {
+        if (bridge.isConnected()) {
+            if (bridgeWasDisconnected) {
+                VRSettings.LOGGER.info("Vivecraft: Apple Vision bridge reconnected");
+                bridgeWasDisconnected = false;
+            }
+            return;
+        }
+
+        releasePinchFallbacks();
+        long now = System.nanoTime();
+        if (now < nextReconnectAttemptNs) {
+            return;
+        }
+        nextReconnectAttemptNs = now + RECONNECT_INTERVAL_NS;
+        bridgeWasDisconnected = true;
+        try {
+            bridge.connect(RECONNECT_TIMEOUT_MS);
+        } catch (IOException e) {
+            this.initStatus = "VisionCraft bridge disconnected. " + e.getMessage();
+            VRSettings.LOGGER.debug("Vivecraft: Apple Vision bridge reconnect pending: {}", e.getMessage());
         }
     }
 
@@ -206,13 +236,24 @@ public class AppleVisionProvider extends MCVR {
     private void updateHandPinch() {
         // If the host link drops mid-pinch, fall back to "no hands" so any held button is
         // released this frame rather than sticking down.
-        AppleNativeBridge.HandState hands = (bridge.isConnected() && sessionState.isReady())
-            ? bridge.getHands()
-            : AppleNativeBridge.HandState.empty();
+        AppleNativeBridge.HandState hands = freshHandState();
         rightPinchHeld = applyPinch(hands.right(), rightPinchHeld, GLFW.GLFW_MOUSE_BUTTON_LEFT);
         leftPinchHeld = applyPinch(hands.left(), leftPinchHeld, GLFW.GLFW_MOUSE_BUTTON_RIGHT);
         rightMiddleHeld = applyMiddlePinch(hands.right(), rightMiddleHeld, GLFW.GLFW_KEY_SPACE);
         leftMiddleHeld = applyMiddlePinch(hands.left(), leftMiddleHeld, GLFW.GLFW_KEY_LEFT_SHIFT);
+    }
+
+    private AppleNativeBridge.HandState freshHandState() {
+        if (!bridge.isConnected() || !sessionState.isReady()) {
+            return AppleNativeBridge.HandState.empty();
+        }
+        AppleNativeBridge.HandState hands = bridge.getHands();
+        long timestampNs = hands.timestampNs();
+        long nowNs = System.currentTimeMillis() * 1_000_000L;
+        if (timestampNs == 0L || nowNs - timestampNs > STALE_HAND_INPUT_NS) {
+            return AppleNativeBridge.HandState.empty();
+        }
+        return hands;
     }
 
     private boolean applyPinch(AppleNativeBridge.Hand hand, boolean held, int mouseButton) {

@@ -80,6 +80,7 @@ class BridgeIntegrationTest {
                 waitForHands(bridge, 3_000);
 
                 AppleNativeBridge.HandState hands = bridge.getHands();
+                assertTrue(hands.timestampNs() > 0);
                 assertTrue(hands.right().tracked());
                 assertEquals(0.92f, hands.right().pinch(), 1e-4f);
                 assertTrue(hands.left().tracked());
@@ -109,6 +110,86 @@ class BridgeIntegrationTest {
                 assertEquals(-0.5f, state.left().axis("thumbstick_y"), 1e-4f);
                 assertEquals(1.0f, state.right().axis("trigger"), 1e-4f);
                 assertEquals(0.2f, state.right().positionM()[0], 1e-4f);
+            }
+        }
+    }
+
+    @Test
+    void hapticCommandReachesMockHost() throws Exception {
+        try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
+            host.start();
+            try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", host.getBoundPort())) {
+                bridge.connect();
+                waitForSession(bridge, 5_000);
+
+                bridge.sendHaptic("right", 0.15f, 180f, 0.6f);
+
+                waitForHaptics(host, 1, 3_000);
+                assertEquals(1, host.getStats().hapticsReceived.get());
+                assertEquals("right", host.getStats().lastHapticHand);
+                assertEquals(0.15f, host.getStats().lastHapticDurationSeconds, 1e-4f);
+                assertEquals(180f, host.getStats().lastHapticFrequencyHz, 1e-4f);
+                assertEquals(0.6f, host.getStats().lastHapticAmplitude, 1e-4f);
+            }
+        }
+    }
+
+    @Test
+    void disconnectClearsRemoteStateAndBridgeReconnects() throws Exception {
+        int port;
+        try (ServerSocketHolder holder = ServerSocketHolder.ephemeral()) {
+            port = holder.port();
+        }
+
+        MockVisionCraftHost firstHost = new MockVisionCraftHost(port);
+        firstHost.start();
+        try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", port)) {
+            bridge.connect();
+            waitForSession(bridge, 5_000);
+            waitForViewConfig(bridge, 3_000);
+            waitForPoses(bridge, 3_000);
+
+            firstHost.close();
+            waitForDisconnected(bridge, 3_000);
+
+            assertFalse(bridge.isConnected());
+            assertEquals(AppleNativeBridge.SessionState.LOST, bridge.getSessionState());
+            assertNotNull(bridge.getLastDisconnectCause());
+            assertNull(bridge.getViewConfig(), "view_config must not survive a lost bridge");
+            assertEquals(0L, bridge.getLastPoseTimestampNs(), "pose timestamp must be cleared");
+            assertEquals(0, bridge.getRecenterCounter(), "recenter state must be cleared");
+
+            try (MockVisionCraftHost secondHost = new MockVisionCraftHost(port)) {
+                secondHost.start();
+                bridge.connectWithRetry(20, 100);
+                waitForSession(bridge, 5_000);
+                assertTrue(bridge.isConnected());
+                assertEquals(AppleNativeBridge.SessionState.READY, bridge.getSessionState());
+                assertNull(bridge.getLastDisconnectCause());
+            }
+        } finally {
+            firstHost.close();
+        }
+    }
+
+    @Test
+    void immediateReconnectSurvivesStaleReaderExit() throws Exception {
+        try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
+            host.start();
+            try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", host.getBoundPort())) {
+                for (int i = 0; i < 20; i++) {
+                    bridge.connect();
+                    waitForSession(bridge, 5_000);
+
+                    bridge.close();
+                    bridge.connect();
+                    waitForSession(bridge, 5_000);
+
+                    Thread.sleep(50);
+                    assertTrue(bridge.isConnected(), "stale reader must not close the reconnected socket");
+                    assertEquals(AppleNativeBridge.SessionState.READY, bridge.getSessionState());
+                    bridge.close();
+                }
             }
         }
     }
@@ -176,6 +257,19 @@ class BridgeIntegrationTest {
         fail("Expected frames");
     }
 
+    private static void waitForHaptics(MockVisionCraftHost host, long min, long timeoutMs)
+        throws InterruptedException
+    {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (host.getStats().hapticsReceived.get() >= min) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("Expected haptics");
+    }
+
     private static void waitForViewConfig(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
@@ -207,6 +301,17 @@ class BridgeIntegrationTest {
             Thread.sleep(20);
         }
         fail("No controller message");
+    }
+
+    private static void waitForDisconnected(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (!bridge.isConnected() && bridge.getSessionState() == AppleNativeBridge.SessionState.LOST) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("Bridge did not report lost connection");
     }
 
     private static void waitForPoses(AppleNativeBridge bridge, long timeoutMs) throws InterruptedException {

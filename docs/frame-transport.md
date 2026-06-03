@@ -1,8 +1,8 @@
-# Frame transport
+# Legacy Frame Transport Notes
 
-> Retired design notes: this file describes the pre-ALVR Metal compositor transport. The current
-> runtime still accepts raw RGBA frames over `bridge/protocol.md`, then encodes side-by-side HEVC and
-> submits it through ALVR `server_core`.
+> Legacy only. This file describes the retired pre-ALVR Metal compositor transport and should not be used as the current implementation contract.
+>
+> Current contract: Bridge v1 still accepts raw RGBA frames over `bridge/protocol.md`; the Mac ALVR host encodes side-by-side HEVC and submits Annex-B NALs through ALVR `server_core` to ALVRClient.
 
 ## MVP path (implemented)
 

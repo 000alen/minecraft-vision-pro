@@ -1,20 +1,28 @@
 ---
-description: macOS ALVR server_core host — VideoToolbox encode and Java bridge
+description: Mac ALVR host — VideoToolbox encode and Bridge v1
 globs: mac-host/**/*
 alwaysApply: false
 ---
 
-# macOS host (ALVR server_core)
+# Mac ALVR Host
 
-Applies to `mac-host/`. The Mac receives Java bridge frames over loopback, encodes side-by-side HEVC with VideoToolbox, and submits Annex-B NALs to ALVR `server_core`. The headset render/decode path lives in the vendored ALVR client.
+This rule file name is legacy. It now applies to the Mac ALVR host, not the retired RemoteImmersiveSpace path.
+
+Applies to `mac-host/`. The Mac receives Bridge v1 frames over loopback, encodes side-by-side HEVC with VideoToolbox, and submits Annex-B NALs to ALVR `server_core`. The headset render/decode path lives in the VisionCraft headset client (ALVRClient).
 
 ## Path constraints
 
 - Do not reintroduce `RemoteImmersiveSpace`, `CompositorRenderer`, `StreamRelay*`, or `StreamProtocol`.
 - Keep ALVR client/server artifacts built from the same ALVR tree via `scripts/prepare-alvr.sh`.
 - Use `ALVRServerCoreShim` for Swift interop; do not import the generated ALVR header directly into Swift.
-- Keep HEVC parameter sets out-of-band via `alvr_set_video_config_nals`.
+- Send HEVC parameter sets through `alvr_set_video_config_nals` and preserve inline VPS/SPS/PPS on IDR access units for decoder-reset recovery.
 - **Do not** add `HandTrackingProvider` under `mac-host/`; hand tracking is visionOS-only.
+
+## Hardware debugging
+
+- Validate ALVR in isolation first with `scripts/vc.sh host --synthetic` or `scripts/vc.sh synthetic`.
+- Capture evidence with `scripts/vc.sh observe <seconds>` before changing code from a hardware report.
+- Only introduce `scripts/vc.sh test-sender` (`sender`) or `scripts/vc.sh minecraft` (`mc`) after the host-native synthetic stream is stable.
 
 ## Required research (before writing code)
 

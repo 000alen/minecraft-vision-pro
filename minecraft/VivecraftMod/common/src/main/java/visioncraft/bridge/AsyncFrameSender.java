@@ -3,6 +3,7 @@ package visioncraft.bridge;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.function.Consumer;
 
 /**
  * Sends stereo eye frames to the host on a dedicated thread so the render thread
@@ -115,6 +116,7 @@ public final class AsyncFrameSender implements AutoCloseable {
     private static final int POOL_SIZE = 3;
 
     private final FrameSink sink;
+    private final Consumer<Throwable> failureObserver;
     private final Object lock = new Object();
     private final Deque<Frame> free = new ArrayDeque<>(POOL_SIZE);
     private final Thread thread;
@@ -123,9 +125,16 @@ public final class AsyncFrameSender implements AutoCloseable {
     private boolean running = true;
     private long droppedFrames;
     private long sentFrames;
+    private long sendFailures;
+    private String lastSendFailure = null;
 
     public AsyncFrameSender(FrameSink sink) {
+        this(sink, failure -> { });
+    }
+
+    public AsyncFrameSender(FrameSink sink, Consumer<Throwable> failureObserver) {
         this.sink = sink;
+        this.failureObserver = failureObserver;
         for (int i = 0; i < POOL_SIZE; i++) {
             free.add(new Frame());
         }
@@ -211,6 +220,15 @@ public final class AsyncFrameSender implements AutoCloseable {
             } catch (IOException | RuntimeException e) {
                 // Drop this frame; the producer gates on session state, so the pipeline
                 // self-heals once the host is ready again. Never kill the sender thread.
+                synchronized (lock) {
+                    sendFailures++;
+                    lastSendFailure = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                }
+                try {
+                    failureObserver.accept(e);
+                } catch (RuntimeException ignored) {
+                    // Diagnostics must never take down the sender thread.
+                }
             } finally {
                 synchronized (lock) {
                     recycle(frame);
@@ -237,6 +255,20 @@ public final class AsyncFrameSender implements AutoCloseable {
     public long sentFrames() {
         synchronized (lock) {
             return sentFrames;
+        }
+    }
+
+    /** Frames that reached the sender thread but failed in the sink. */
+    public long sendFailures() {
+        synchronized (lock) {
+            return sendFailures;
+        }
+    }
+
+    /** Last sink failure message, if any. */
+    public String lastSendFailure() {
+        synchronized (lock) {
+            return lastSendFailure;
         }
     }
 

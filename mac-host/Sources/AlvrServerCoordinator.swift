@@ -3,6 +3,9 @@ import simd
 
 /// Owns the ALVR server_core C ABI and adapts it to VisionCraft's existing Java bridge.
 final class AlvrServerCoordinator {
+    private static let runtimePreparationLock = NSLock()
+    private static var runtimePrepared = false
+
     private enum ControllerHand: String, CaseIterable {
         case left
         case right
@@ -40,6 +43,8 @@ final class AlvrServerCoordinator {
         let targetEyeWidth: Int
         let targetEyeHeight: Int
         let fps: Int
+        let lastTrackingSampleTimestampNs: UInt64
+        let lastVideoTargetTimestampNs: UInt64
     }
 
     var onStatus: ((String) -> Void)?
@@ -59,11 +64,14 @@ final class AlvrServerCoordinator {
     private var syntheticTimer: DispatchSourceTimer?
     private var targetEyeWidth = 2144
     private var targetEyeHeight = 1206
+    private var viewConfigEyeWidth = 2144
+    private var viewConfigEyeHeight = 1206
     private var fps = 90
     private var nextFrameId: UInt64 = 1
-    private var nextVideoTimestampNs: UInt64 = 0
     private var framesEncoded: UInt64 = 0
     private var framesSent: UInt64 = 0
+    private var lastTrackingSampleTimestampNs: UInt64 = 0
+    private var lastVideoTargetTimestampNs: UInt64 = 0
     private var recenterCounter: UInt64 = 0
     private var lastVideoConfig = Data()
     private var sentVideoConfig = false
@@ -94,8 +102,11 @@ final class AlvrServerCoordinator {
             let target = vc_alvr_initialize()
             self.targetEyeWidth = max(1, Int(target.game_render_width))
             self.targetEyeHeight = max(1, Int(target.game_render_height))
+            self.viewConfigEyeWidth = self.targetEyeWidth
+            self.viewConfigEyeHeight = self.targetEyeHeight
             self.fps = 90
-            self.nextVideoTimestampNs = 0
+            self.resetFrameCountersLocked()
+            self.lastTrackingSampleTimestampNs = 0
             self.sentVideoConfig = false
             self.lastVideoConfig.removeAll(keepingCapacity: true)
 
@@ -121,6 +132,8 @@ final class AlvrServerCoordinator {
             self.clientConnected = false
             self.pollLoopActive = false
             self.encoder.stop()
+            self.resetFrameCountersLocked()
+            self.lastTrackingSampleTimestampNs = 0
             self.setStatus("ALVR server_core stopped")
             self.onClientConnectionChange?(false)
         }
@@ -152,7 +165,7 @@ final class AlvrServerCoordinator {
     func submitFrame(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int,
                      frameId: UInt64, renderOrientation: [Float]? = nil) {
         queue.async {
-            guard self.running, self.clientConnected else { return }
+            guard self.running, self.clientConnected, self.lastTrackingSampleTimestampNs != 0 else { return }
             self.targetEyeWidth = eyeWidth
             self.targetEyeHeight = eyeHeight
             self.encoder.encode(
@@ -161,6 +174,7 @@ final class AlvrServerCoordinator {
                 eyeWidth: eyeWidth,
                 eyeHeight: eyeHeight,
                 frameId: frameId,
+                targetTimestampNs: self.lastTrackingSampleTimestampNs,
                 renderOrientation: renderOrientation
             )
         }
@@ -175,7 +189,9 @@ final class AlvrServerCoordinator {
                 framesSent: framesSent,
                 targetEyeWidth: targetEyeWidth,
                 targetEyeHeight: targetEyeHeight,
-                fps: fps
+                fps: fps,
+                lastTrackingSampleTimestampNs: lastTrackingSampleTimestampNs,
+                lastVideoTargetTimestampNs: lastVideoTargetTimestampNs
             )
         }
     }
@@ -191,6 +207,10 @@ final class AlvrServerCoordinator {
         try? FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
 
+        Self.runtimePreparationLock.lock()
+        defer { Self.runtimePreparationLock.unlock() }
+        guard !Self.runtimePrepared else { return }
+
         config.path.withCString { configPtr in
             logs.path.withCString { logsPtr in
                 vc_alvr_initialize_environment(configPtr, logsPtr)
@@ -203,6 +223,7 @@ final class AlvrServerCoordinator {
                 vc_alvr_initialize_logging(sessionPtr, crashPtr)
             }
         }
+        Self.runtimePrepared = true
     }
 
     private static func repoRootPath() -> String {
@@ -258,6 +279,8 @@ final class AlvrServerCoordinator {
         case VC_ALVR_EVENT_CLIENT_CONNECTED:
             clientConnected = true
             sentVideoConfig = false
+            resetFrameCountersLocked()
+            lastTrackingSampleTimestampNs = 0
             resetControllerState()
             refreshDynamicEncoderParamsLocked()
             requestKeyframe()
@@ -266,6 +289,8 @@ final class AlvrServerCoordinator {
         case VC_ALVR_EVENT_CLIENT_DISCONNECTED:
             clientConnected = false
             sentVideoConfig = false
+            resetFrameCountersLocked()
+            lastTrackingSampleTimestampNs = 0
             resetControllerState()
             publishControllerState(timestampNs: Self.epochNanoseconds())
             setStatus("ALVR headset client disconnected")
@@ -273,6 +298,7 @@ final class AlvrServerCoordinator {
         case VC_ALVR_EVENT_VIEWS_CONFIG:
             publishViewConfig(event)
         case VC_ALVR_EVENT_TRACKING_UPDATED:
+            lastTrackingSampleTimestampNs = event.sample_timestamp_ns
             publishPose(sampleTimestampNs: event.sample_timestamp_ns)
             updateControllerPoses(sampleTimestampNs: event.sample_timestamp_ns)
             publishControllerState(timestampNs: Self.epochNanoseconds())
@@ -298,7 +324,7 @@ final class AlvrServerCoordinator {
 
         refreshDynamicEncoderParamsLocked()
         framesEncoded += 1
-        var payload = accessUnit.data
+        let payload = accessUnit.data
         if accessUnit.keyframe {
             let split = Self.splitHEVCParameterSets(from: payload)
             if !split.config.isEmpty, split.config != lastVideoConfig {
@@ -312,25 +338,21 @@ final class AlvrServerCoordinator {
                 }
                 sentVideoConfig = true
             }
-            if !split.payload.isEmpty {
-                payload = split.payload
-            }
+            // Keep parameter sets inline on IDR frames too. ALVR normally receives them out of
+            // band, but inline VPS/SPS/PPS lets the visionOS client recover if its decoder resets
+            // after the first config handoff.
         }
 
         guard sentVideoConfig, !payload.isEmpty else { return }
 
-        let timestamp = nextVideoTimestampNs
-        nextVideoTimestampNs += UInt64(1_000_000_000 / max(1, fps))
+        let timestamp = accessUnit.targetTimestampNs
         var mutablePayload = payload
         let payloadCount = Int32(mutablePayload.count)
         mutablePayload.withUnsafeMutableBytes { raw in
             guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
             vc_alvr_send_video_nal(timestamp, base, payloadCount, accessUnit.keyframe)
         }
-        // server_core exposes composed/present reports but not separate decoded/submit callbacks in
-        // this pinned C ABI. Report the host-side ALVR submission point so pacing stats are not idle.
-        vc_alvr_report_composed(timestamp, 0)
-        vc_alvr_report_present(timestamp, 0)
+        lastVideoTargetTimestampNs = timestamp
         framesSent += 1
     }
 
@@ -341,6 +363,12 @@ final class AlvrServerCoordinator {
         guard negotiatedFps > 0, negotiatedFps != fps else { return }
         fps = min(max(negotiatedFps, 1), 120)
         encoder.configure(eyeWidth: targetEyeWidth, eyeHeight: targetEyeHeight, fps: fps)
+    }
+
+    private func resetFrameCountersLocked() {
+        framesEncoded = 0
+        framesSent = 0
+        lastVideoTargetTimestampNs = 0
     }
 
     private func startSyntheticFramesLocked() {
@@ -356,18 +384,20 @@ final class AlvrServerCoordinator {
     }
 
     private func submitSyntheticFrameLocked() {
-        guard running, clientConnected else { return }
+        guard running, clientConnected, lastTrackingSampleTimestampNs != 0 else { return }
         let width = max(64, targetEyeWidth)
         let height = max(64, targetEyeHeight)
         let frameId = nextFrameId
         nextFrameId += 1
 
-        let left = Self.makeTestPattern(width: width, height: height, frameId: frameId, rightEye: false)
-        let right = Self.makeTestPattern(width: width, height: height, frameId: frameId, rightEye: true)
-        encoder.encode(left: left, right: right, eyeWidth: width, eyeHeight: height, frameId: frameId)
+        let pattern = Self.makeTestPattern(width: width, height: height, frameId: frameId)
+        let left = pattern
+        let right = pattern
+        encoder.encode(left: left, right: right, eyeWidth: width, eyeHeight: height,
+                       frameId: frameId, targetTimestampNs: lastTrackingSampleTimestampNs)
     }
 
-    private static func makeTestPattern(width: Int, height: Int, frameId: UInt64, rightEye: Bool) -> Data {
+    private static func makeTestPattern(width: Int, height: Int, frameId: UInt64) -> Data {
         var data = Data(count: width * height * 4)
         data.withUnsafeMutableBytes { raw in
             guard let px = raw.bindMemory(to: UInt8.self).baseAddress else { return }
@@ -395,9 +425,9 @@ final class AlvrServerCoordinator {
                         px[i + 1] = 180
                         px[i + 2] = 255
                     } else {
-                        px[i + 0] = rightEye ? UInt8(40 + checker * 80) : UInt8(180 + checker * 50)
+                        px[i + 0] = UInt8(180 + checker * 50)
                         px[i + 1] = stripe
-                        px[i + 2] = rightEye ? UInt8(220 &- framePhase) : framePhase
+                        px[i + 2] = framePhase
                     }
                     px[i + 3] = 255
                 }
@@ -473,8 +503,8 @@ final class AlvrServerCoordinator {
         let left = Self.tangents(from: event.left_fov)
         let right = Self.tangents(from: event.right_fov)
         let eyes = [
-            StereoMath.EyeView(index: 0, tangents: left, width: targetEyeWidth, height: targetEyeHeight),
-            StereoMath.EyeView(index: 1, tangents: right, width: targetEyeWidth, height: targetEyeHeight)
+            StereoMath.EyeView(index: 0, tangents: left, width: viewConfigEyeWidth, height: viewConfigEyeHeight),
+            StereoMath.EyeView(index: 1, tangents: right, width: viewConfigEyeWidth, height: viewConfigEyeHeight)
         ]
         onUplinkLine?(StereoMath.viewConfigJSON(eyes: eyes, ipdMeters: event.ipd_m))
     }

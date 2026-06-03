@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -136,6 +137,24 @@ class AsyncFrameSenderTest {
         // Must be a no-op, not an exception or leak.
         sender.commitFrame(f, 1L, 0L, 0.05f, 512f, null);
         assertFalse(sender.sentFrames() > 1);
+    }
+
+    @Test
+    void recordsAndReportsSendFailures() throws Exception {
+        CountDownLatch observed = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        try (AsyncFrameSender sender = new AsyncFrameSender(frame -> {
+            throw new java.io.IOException("host closed");
+        }, e -> {
+            failure.set(e);
+            observed.countDown();
+        })) {
+            sender.commitFrame(sender.beginFrame(2, 2), 1L, 0L, 0.05f, 512f, null);
+            assertTrue(observed.await(2, TimeUnit.SECONDS), "failure callback observed");
+            assertEquals(1L, sender.sendFailures());
+            assertEquals("host closed", sender.lastSendFailure());
+            assertNotNull(failure.get());
+        }
     }
 
     private static void awaitCount(List<Long> list, int target) throws InterruptedException {

@@ -10,6 +10,8 @@ MacBook Pro M4 → Minecraft + Vivecraft fork → VisionCraftHost + ALVR server_
 
 MVP: seated play, head-tracked stereo, ALVR hand/gamepad-style controller input, crosshair block interaction, 30-minute survival session without hard crash.
 
+Canonical repository names are defined in [repo-structure.md](repo-structure.md). Phase 0 keeps current top-level paths in place.
+
 ## Non-goals (MVP)
 
 - SteamVR, cloud GPU, OpenXR runtime
@@ -54,7 +56,7 @@ flowchart TB
 
 ## Components
 
-### Minecraft mod layer (`minecraft/`)
+### Vivecraft Apple provider (`minecraft/VivecraftMod/`)
 
 Fork VivecraftMod; add `org.vivecraft.client_vr.provider.apple`:
 
@@ -70,7 +72,7 @@ Fork VivecraftMod; add `org.vivecraft.client_vr.provider.apple`:
 
 Register `VRSettings.VRProvider.APPLE_VISION` and branch in `VRState.initializeVR()`.
 
-### Native macOS host (`mac-host/`)
+### Mac ALVR host (`mac-host/`)
 
 SwiftUI app using VideoToolbox + ALVR server_core (macOS 26+):
 
@@ -79,7 +81,7 @@ SwiftUI app using VideoToolbox + ALVR server_core (macOS 26+):
 - `AlvrServerCoordinator` — ALVR server_core lifecycle, event polling, controller JSON, video NAL submission
 - `PosePublisher` — fallback pose publisher, suppressed while ALVR tracking is connected
 
-### Bridge (`bridge/`)
+### Bridge v1 (`bridge/`)
 
 Versioned JSON control plane + binary frame payloads. Default port **19735**. See [bridge/protocol.md](../bridge/protocol.md).
 
