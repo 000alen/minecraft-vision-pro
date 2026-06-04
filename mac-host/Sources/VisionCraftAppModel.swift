@@ -22,6 +22,10 @@ final class VisionCraftAppModel {
     var framesEncoded: UInt64 = 0
     var alvrLastTrackingTimestampNs: UInt64 = 0
     var alvrLastVideoTimestampNs: UInt64 = 0
+    var bridgeStreamingReady = false
+    var sentVideoConfig = false
+    var syntheticFramesEnabled = false
+    var framesDroppedNoConfig: UInt64 = 0
 
     let bridgeServer = JavaBridgeServer()
     let controlApiServer = ControlApiServer()
@@ -46,7 +50,12 @@ final class VisionCraftAppModel {
         if !bridgeRunning { return "Start the Java bridge" }
         if !alvrRunning { return "Start ALVR server_core" }
         if !alvrClientConnected { return "Run ALVRClient on Apple Vision Pro" }
-        if framesEncoded == 0 { return "Start Minecraft or the test sender" }
+        if framesEncoded == 0 {
+            if syntheticFramesEnabled {
+                return "Enter immersive mode on AVP"
+            }
+            return "Run scripts/vc.sh synthetic"
+        }
         return "Stream is live"
     }
 
@@ -138,17 +147,31 @@ final class VisionCraftAppModel {
             Task { @MainActor in self?.diagnosticText = status }
         }
         alvr.onClientConnectionChange = { [weak self] connected in
-            let session: BridgeSessionState = connected ? .ready : .closed
-            self?.bridgeServer.broadcastSession(session)
             Task { @MainActor in
                 guard let self else { return }
                 self.alvrClientConnected = connected
                 self.posePublisher.setSuppressLocalPose(connected)
                 self.posePublisher.setSuppressLocalViewConfig(connected)
+                if !connected {
+                    self.sessionState = .closed
+                    self.bridgeStreamingReady = false
+                    self.bridgeServer.broadcastSession(.closed)
+                    self.framesReceived = 0
+                    self.lastFrameId = 0
+                    self.framesEncoded = 0
+                    self.alvrFramesSent = 0
+                    self.diagnosticText = "ALVR headset disconnected"
+                } else {
+                    self.diagnosticText = "ALVR headset connected; waiting for tracking"
+                }
+            }
+        }
+        alvr.onBridgeSessionState = { [weak self] session in
+            self?.bridgeServer.broadcastSession(session)
+            Task { @MainActor in
+                guard let self else { return }
                 self.sessionState = session
-                self.framesEncoded = 0
-                self.alvrFramesSent = 0
-                self.diagnosticText = connected ? "ALVR headset connected" : "ALVR headset disconnected"
+                self.bridgeStreamingReady = session == .ready
             }
         }
         alvr.start(enableSyntheticFrames: enableSyntheticFrames)
@@ -181,6 +204,13 @@ final class VisionCraftAppModel {
         alvrTargetEyeHeight = snapshot.targetEyeHeight
         alvrLastTrackingTimestampNs = snapshot.lastTrackingSampleTimestampNs
         alvrLastVideoTimestampNs = snapshot.lastVideoTargetTimestampNs
+        bridgeStreamingReady = snapshot.bridgeStreamingReady
+        sentVideoConfig = snapshot.sentVideoConfig
+        syntheticFramesEnabled = snapshot.syntheticFramesEnabled
+        framesDroppedNoConfig = snapshot.framesDroppedNoConfig
+        if snapshot.clientConnected, !snapshot.bridgeStreamingReady {
+            sessionState = .paused
+        }
     }
 
     private func handleControlRequest(_ request: ControlApiServer.Request) async -> ControlApiServer.Response {
@@ -207,6 +237,14 @@ final class VisionCraftAppModel {
         case ("POST", "/alvr/stop"):
             stopAlvr()
             return .json(statusJson())
+        case ("POST", "/debug/capture"):
+            let frames = request.query["frames"].flatMap(Int.init) ?? 1
+            // Force an IDR so the self-decode roundtrip starts from a clean keyframe.
+            alvr.requestKeyframe()
+            let path = FrameCapture.shared.arm(
+                frames: frames, repoRoot: Self.repoRootPath(), header: alvr.captureHeaderJSON())
+            let body = "{\"ok\":true,\"frames\":\(frames),\"bundle\":\"\(Self.escapeJson(path))\"}"
+            return .json(body)
         default:
             return .json(status: 404, #"{"error":"not_found"}"#)
         }
@@ -215,7 +253,7 @@ final class VisionCraftAppModel {
     private func statusJson() -> String {
         refreshAlvrStats()
         return """
-        {"ok":true,"pipeline_ready":\(pipelineReady),"bridge_running":\(bridgeRunning),"bridge_port":\(bridgePort),"control_port":\(controlPort),"alvr_running":\(alvrRunning),"alvr_client_connected":\(alvrClientConnected),"alvr_frames_sent":\(alvrFramesSent),"alvr_target_eye_width":\(alvrTargetEyeWidth),"alvr_target_eye_height":\(alvrTargetEyeHeight),"alvr_last_tracking_timestamp_ns":\(alvrLastTrackingTimestampNs),"alvr_last_video_timestamp_ns":\(alvrLastVideoTimestampNs),"frames_encoded":\(framesEncoded),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),"diagnostic":"\(Self.escapeJson(diagnosticText))","next_step":"\(Self.escapeJson(nextStepTitle))"}
+        {"ok":true,"pipeline_ready":\(pipelineReady),"bridge_running":\(bridgeRunning),"bridge_port":\(bridgePort),"control_port":\(controlPort),"alvr_running":\(alvrRunning),"alvr_client_connected":\(alvrClientConnected),"bridge_streaming_ready":\(bridgeStreamingReady),"sent_video_config":\(sentVideoConfig),"synthetic_frames_enabled":\(syntheticFramesEnabled),"alvr_frames_sent":\(alvrFramesSent),"alvr_target_eye_width":\(alvrTargetEyeWidth),"alvr_target_eye_height":\(alvrTargetEyeHeight),"alvr_last_tracking_timestamp_ns":\(alvrLastTrackingTimestampNs),"alvr_last_video_timestamp_ns":\(alvrLastVideoTimestampNs),"frames_encoded":\(framesEncoded),"frames_dropped_no_config":\(framesDroppedNoConfig),"session_state":"\(sessionState.rawValue)","frames_received":\(framesReceived),"last_frame_id":\(lastFrameId),"diagnostic":"\(Self.escapeJson(diagnosticText))","next_step":"\(Self.escapeJson(nextStepTitle))"}
         """
     }
 

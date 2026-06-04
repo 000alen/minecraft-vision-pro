@@ -38,8 +38,12 @@ final class AlvrServerCoordinator {
     struct StatusSnapshot {
         let running: Bool
         let clientConnected: Bool
+        let bridgeStreamingReady: Bool
+        let sentVideoConfig: Bool
+        let syntheticFramesEnabled: Bool
         let framesEncoded: UInt64
         let framesSent: UInt64
+        let framesDroppedNoConfig: UInt64
         let targetEyeWidth: Int
         let targetEyeHeight: Int
         let fps: Int
@@ -48,7 +52,10 @@ final class AlvrServerCoordinator {
     }
 
     var onStatus: ((String) -> Void)?
+    /// ALVR TCP/session connected (headset link up).
     var onClientConnectionChange: ((Bool) -> Void)?
+    /// Bridge v1 `session` state for Java (`paused` until tracking + view_config, then `ready`).
+    var onBridgeSessionState: ((BridgeSessionState) -> Void)?
     var onUplinkLine: ((String) -> Void)?
 
     private let queue = DispatchQueue(label: "visioncraft.alvr.server")
@@ -62,6 +69,9 @@ final class AlvrServerCoordinator {
     private var pollLoopShouldRun = false
     private var pollLoopGeneration: UInt64 = 0
     private var syntheticTimer: DispatchSourceTimer?
+    private var syntheticFramesEnabled = false
+    private var negotiatedEyeWidth = 2144
+    private var negotiatedEyeHeight = 1206
     private var targetEyeWidth = 2144
     private var targetEyeHeight = 1206
     private var viewConfigEyeWidth = 2144
@@ -70,6 +80,13 @@ final class AlvrServerCoordinator {
     private var nextFrameId: UInt64 = 1
     private var framesEncoded: UInt64 = 0
     private var framesSent: UInt64 = 0
+    private var framesDroppedNoConfig: UInt64 = 0
+    private var droppedNoRenderTs: UInt64 = 0
+    private var bridgeStreamingReady = false
+    private var lastViewConfigPublishNs: UInt64 = 0
+    private var lastViewConfigLeftFov = VCAlvrFov()
+    private var lastViewConfigRightFov = VCAlvrFov()
+    private var lastViewConfigIpdM: Float = 0.063
     private var lastTrackingSampleTimestampNs: UInt64 = 0
     private var lastVideoTargetTimestampNs: UInt64 = 0
     private var recenterCounter: UInt64 = 0
@@ -87,6 +104,15 @@ final class AlvrServerCoordinator {
                 self?.send(accessUnit)
             }
         }
+        encoder.onDecoderConfigAnnexB = { [weak self] config in
+            self?.queue.async {
+                guard let self, !config.isEmpty else { return }
+                if config != self.lastVideoConfig {
+                    self.lastVideoConfig = config
+                    self.sentVideoConfig = false
+                }
+            }
+        }
     }
 
     func start(enableSyntheticFrames: Bool = false) {
@@ -100,15 +126,19 @@ final class AlvrServerCoordinator {
 
             self.prepareRuntimeDirectories()
             let target = vc_alvr_initialize()
-            self.targetEyeWidth = max(1, Int(target.game_render_width))
-            self.targetEyeHeight = max(1, Int(target.game_render_height))
-            self.viewConfigEyeWidth = self.targetEyeWidth
-            self.viewConfigEyeHeight = self.targetEyeHeight
+            self.negotiatedEyeWidth = max(1, Int(target.game_render_width))
+            self.negotiatedEyeHeight = max(1, Int(target.game_render_height))
+            self.targetEyeWidth = self.negotiatedEyeWidth
+            self.targetEyeHeight = self.negotiatedEyeHeight
+            self.viewConfigEyeWidth = self.negotiatedEyeWidth
+            self.viewConfigEyeHeight = self.negotiatedEyeHeight
             self.fps = 90
             self.resetFrameCountersLocked()
             self.lastTrackingSampleTimestampNs = 0
             self.sentVideoConfig = false
             self.lastVideoConfig.removeAll(keepingCapacity: true)
+            self.bridgeStreamingReady = false
+            self.lastViewConfigPublishNs = 0
 
             vc_alvr_start_connection()
             self.running = true
@@ -125,6 +155,7 @@ final class AlvrServerCoordinator {
             guard self.running else { return }
             self.syntheticTimer?.cancel()
             self.syntheticTimer = nil
+            self.syntheticFramesEnabled = false
             self.setPollingEnabled(false)
             self.pollQueue.sync { }
             vc_alvr_shutdown()
@@ -134,7 +165,9 @@ final class AlvrServerCoordinator {
             self.encoder.stop()
             self.resetFrameCountersLocked()
             self.lastTrackingSampleTimestampNs = 0
+            self.bridgeStreamingReady = false
             self.setStatus("ALVR server_core stopped")
+            self.onBridgeSessionState?(.closed)
             self.onClientConnectionChange?(false)
         }
     }
@@ -163,20 +196,73 @@ final class AlvrServerCoordinator {
     }
 
     func submitFrame(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int,
-                     frameId: UInt64, renderOrientation: [Float]? = nil) {
+                     frameId: UInt64, renderSampleTimestampNs: UInt64 = 0) {
         queue.async {
             guard self.running, self.clientConnected, self.lastTrackingSampleTimestampNs != 0 else { return }
+            guard !self.syntheticFramesEnabled else { return }
+            // ALVR per-frame render-pose contract: a frame MUST be submitted under the EXACT
+            // tracking-sample timestamp it was rendered for, so the client can look up the head pose
+            // it predicted for that sample and reproject correctly. Vivecraft echoes that id on the
+            // frame. If it is missing we cannot satisfy the contract — drop the frame rather than
+            // submit an arbitrary timestamp: a non-matching id makes the client fall back to an
+            // identity head pose, which double-counts the entire head orientation (severe swim +
+            // per-eye divergence / non-fusion).
+            guard renderSampleTimestampNs != 0 else {
+                self.droppedNoRenderTs &+= 1
+                if Self.logPoseEnabled, self.droppedNoRenderTs % 90 == 1 {
+                    NSLog("[VisionCraft] dropping frame %llu: no render timestamp echoed (count=%llu)",
+                          frameId, self.droppedNoRenderTs)
+                }
+                return
+            }
+            let targetTimestampNs = renderSampleTimestampNs
+
+            let dimsChanged = self.targetEyeWidth != eyeWidth || self.targetEyeHeight != eyeHeight
             self.targetEyeWidth = eyeWidth
             self.targetEyeHeight = eyeHeight
+            if dimsChanged {
+                self.viewConfigEyeWidth = eyeWidth
+                self.viewConfigEyeHeight = eyeHeight
+                self.encoder.configure(eyeWidth: eyeWidth, eyeHeight: eyeHeight, fps: self.fps)
+                self.republishViewConfigIfNeeded(force: true)
+            }
+
+            // Frame-timing report: the frame is composed (rendered, pre-encode) now. ALVR uses this
+            // (with report_present at NAL submit) for its latency stats, which drive the client's
+            // pose-prediction horizon. offset 0 = the event happened at call time.
+            vc_alvr_report_composed(targetTimestampNs, 0)
+
+            // Diagnostic: confirm the submit ts is a real recent tracking sample and how far the
+            // render lags the newest sample (VISIONCRAFT_LOG_POSE=1).
+            if Self.logPoseEnabled, frameId % 90 == 0 {
+                let behind = self.lastTrackingSampleTimestampNs >= targetTimestampNs
+                    ? self.lastTrackingSampleTimestampNs - targetTimestampNs : 0
+                NSLog("[VisionCraft] submit frame=%llu render_ts=%llu newest_sample=%llu behind_ns=%llu",
+                      frameId, targetTimestampNs, self.lastTrackingSampleTimestampNs, behind)
+            }
+
             self.encoder.encode(
                 left: left,
                 right: right,
                 eyeWidth: eyeWidth,
                 eyeHeight: eyeHeight,
                 frameId: frameId,
-                targetTimestampNs: self.lastTrackingSampleTimestampNs,
-                renderOrientation: renderOrientation
+                targetTimestampNs: targetTimestampNs
             )
+        }
+    }
+
+    /// Geometry/context header for a capture bundle: latest device view_config (positive
+    /// `[left,right,up,down]` tangents + IPD), per-eye dims, fps, and the synthetic-frames flag.
+    func captureHeaderJSON() -> String {
+        queue.sync {
+            let left = Self.tangents(from: lastViewConfigLeftFov)
+            let right = Self.tangents(from: lastViewConfigRightFov)
+            return "{\"ipd_m\":\(StereoMath.fmt(lastViewConfigIpdM)),"
+                + "\"eye_width\":\(viewConfigEyeWidth),\"eye_height\":\(viewConfigEyeHeight),"
+                + "\"fps\":\(fps),\"synthetic_frames\":\(syntheticFramesEnabled),"
+                + "\"left_tangents\":[\(StereoMath.fmt(left.x)),\(StereoMath.fmt(left.y)),\(StereoMath.fmt(left.z)),\(StereoMath.fmt(left.w))],"
+                + "\"right_tangents\":[\(StereoMath.fmt(right.x)),\(StereoMath.fmt(right.y)),\(StereoMath.fmt(right.z)),\(StereoMath.fmt(right.w))]}"
         }
     }
 
@@ -185,8 +271,12 @@ final class AlvrServerCoordinator {
             StatusSnapshot(
                 running: running,
                 clientConnected: clientConnected,
+                bridgeStreamingReady: bridgeStreamingReady,
+                sentVideoConfig: sentVideoConfig,
+                syntheticFramesEnabled: syntheticFramesEnabled,
                 framesEncoded: framesEncoded,
                 framesSent: framesSent,
+                framesDroppedNoConfig: framesDroppedNoConfig,
                 targetEyeWidth: targetEyeWidth,
                 targetEyeHeight: targetEyeHeight,
                 fps: fps,
@@ -281,27 +371,45 @@ final class AlvrServerCoordinator {
             sentVideoConfig = false
             resetFrameCountersLocked()
             lastTrackingSampleTimestampNs = 0
+            bridgeStreamingReady = false
+            // Drop stale Java bridge dimensions from a prior session; VIEWS_CONFIG reaffirms from AVP.
+            targetEyeWidth = negotiatedEyeWidth
+            targetEyeHeight = negotiatedEyeHeight
+            viewConfigEyeWidth = negotiatedEyeWidth
+            viewConfigEyeHeight = negotiatedEyeHeight
+            nextFrameId = 1
             resetControllerState()
             refreshDynamicEncoderParamsLocked()
             requestKeyframe()
-            setStatus("ALVR headset client connected")
+            setStatus("ALVR headset client connected; waiting for tracking")
+            onBridgeSessionState?(.paused)
             onClientConnectionChange?(true)
         case VC_ALVR_EVENT_CLIENT_DISCONNECTED:
             clientConnected = false
             sentVideoConfig = false
             resetFrameCountersLocked()
             lastTrackingSampleTimestampNs = 0
+            bridgeStreamingReady = false
             resetControllerState()
             publishControllerState(timestampNs: Self.epochNanoseconds())
             setStatus("ALVR headset client disconnected")
+            onBridgeSessionState?(.closed)
             onClientConnectionChange?(false)
         case VC_ALVR_EVENT_VIEWS_CONFIG:
+            // Headset FOV comes from the event; stream dimensions stay on the ALVR contract.
+            viewConfigEyeWidth = negotiatedEyeWidth
+            viewConfigEyeHeight = negotiatedEyeHeight
+            targetEyeWidth = negotiatedEyeWidth
+            targetEyeHeight = negotiatedEyeHeight
+            encoder.configure(eyeWidth: viewConfigEyeWidth, eyeHeight: viewConfigEyeHeight, fps: fps)
             publishViewConfig(event)
+            updateBridgeStreamingReadyLocked()
         case VC_ALVR_EVENT_TRACKING_UPDATED:
             lastTrackingSampleTimestampNs = event.sample_timestamp_ns
             publishPose(sampleTimestampNs: event.sample_timestamp_ns)
             updateControllerPoses(sampleTimestampNs: event.sample_timestamp_ns)
             publishControllerState(timestampNs: Self.epochNanoseconds())
+            updateBridgeStreamingReadyLocked()
         case VC_ALVR_EVENT_RAW_BUTTONS_UPDATED:
             drainRawButtons()
             publishControllerState(timestampNs: Self.epochNanoseconds())
@@ -323,13 +431,21 @@ final class AlvrServerCoordinator {
         guard running, clientConnected else { return }
 
         refreshDynamicEncoderParamsLocked()
-        framesEncoded += 1
         let payload = accessUnit.data
+        guard !payload.isEmpty else { return }
+
         if accessUnit.keyframe {
             let split = Self.splitHEVCParameterSets(from: payload)
             if !split.config.isEmpty, split.config != lastVideoConfig {
                 lastVideoConfig = split.config
                 sentVideoConfig = false
+            }
+            if lastVideoConfig.isEmpty {
+                let cached = encoder.decoderConfigAnnexB()
+                if !cached.isEmpty {
+                    lastVideoConfig = cached
+                    sentVideoConfig = false
+                }
             }
             if !lastVideoConfig.isEmpty, !sentVideoConfig {
                 lastVideoConfig.withUnsafeBytes { raw in
@@ -343,7 +459,12 @@ final class AlvrServerCoordinator {
             // after the first config handoff.
         }
 
-        guard sentVideoConfig, !payload.isEmpty else { return }
+        guard sentVideoConfig else {
+            if accessUnit.keyframe {
+                framesDroppedNoConfig += 1
+            }
+            return
+        }
 
         let timestamp = accessUnit.targetTimestampNs
         var mutablePayload = payload
@@ -352,7 +473,11 @@ final class AlvrServerCoordinator {
             guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
             vc_alvr_send_video_nal(timestamp, base, payloadCount, accessUnit.keyframe)
         }
+        // Frame-timing report: the frame is presented (handed to ALVR for transmit) now. Pairs with
+        // report_composed in submitFrame so ALVR's pipeline-latency stats are complete.
+        vc_alvr_report_present(timestamp, 0)
         lastVideoTargetTimestampNs = timestamp
+        framesEncoded += 1
         framesSent += 1
     }
 
@@ -360,21 +485,56 @@ final class AlvrServerCoordinator {
         var params = VCAlvrDynamicEncoderParams()
         guard vc_alvr_get_dynamic_encoder_params(&params) else { return }
         let negotiatedFps = Int(params.framerate.rounded())
-        guard negotiatedFps > 0, negotiatedFps != fps else { return }
-        fps = min(max(negotiatedFps, 1), 120)
-        encoder.configure(eyeWidth: targetEyeWidth, eyeHeight: targetEyeHeight, fps: fps)
+        if negotiatedFps > 0, negotiatedFps != fps {
+            fps = min(max(negotiatedFps, 1), 120)
+            encoder.configure(eyeWidth: viewConfigEyeWidth, eyeHeight: viewConfigEyeHeight, fps: fps)
+        }
+        let bitrate = Int(params.bitrate_bps.rounded())
+        if bitrate > 0 {
+            encoder.setAverageBitrate(bitrate)
+        }
     }
 
     private func resetFrameCountersLocked() {
         framesEncoded = 0
         framesSent = 0
+        framesDroppedNoConfig = 0
         lastVideoTargetTimestampNs = 0
     }
 
+    private func updateBridgeStreamingReadyLocked() {
+        guard clientConnected,
+              lastTrackingSampleTimestampNs != 0,
+              viewConfigEyeWidth > 0,
+              viewConfigEyeHeight > 0 else { return }
+        guard !bridgeStreamingReady else { return }
+        bridgeStreamingReady = true
+        setStatus("ALVR streaming ready for Java frames")
+        onBridgeSessionState?(.ready)
+    }
+
+    private func republishViewConfigIfNeeded(force: Bool) {
+        guard clientConnected else { return }
+        let now = Self.epochNanoseconds()
+        if !force, now &- lastViewConfigPublishNs < 100_000_000 { return }
+        lastViewConfigPublishNs = now
+        let left = Self.tangents(from: lastViewConfigLeftFov)
+        let right = Self.tangents(from: lastViewConfigRightFov)
+        let eyes = [
+            StereoMath.EyeView(index: 0, tangents: left, width: viewConfigEyeWidth, height: viewConfigEyeHeight),
+            StereoMath.EyeView(index: 1, tangents: right, width: viewConfigEyeWidth, height: viewConfigEyeHeight)
+        ]
+        onUplinkLine?(StereoMath.viewConfigJSON(eyes: eyes, ipdMeters: lastViewConfigIpdM))
+    }
+
     private func startSyntheticFramesLocked() {
-        guard syntheticTimer == nil else { return }
+        guard syntheticTimer == nil else {
+            syntheticFramesEnabled = true
+            return
+        }
+        syntheticFramesEnabled = true
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: 1.0 / Double(max(1, min(fps, 60))))
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(max(1, fps)))
         timer.setEventHandler { [weak self] in
             self?.submitSyntheticFrameLocked()
         }
@@ -385,8 +545,8 @@ final class AlvrServerCoordinator {
 
     private func submitSyntheticFrameLocked() {
         guard running, clientConnected, lastTrackingSampleTimestampNs != 0 else { return }
-        let width = max(64, targetEyeWidth)
-        let height = max(64, targetEyeHeight)
+        let width = max(64, viewConfigEyeWidth)
+        let height = max(64, viewConfigEyeHeight)
         let frameId = nextFrameId
         nextFrameId += 1
 
@@ -491,21 +651,65 @@ final class AlvrServerCoordinator {
 
     private func publishPose(sampleTimestampNs: UInt64) {
         var pose = VCAlvrPoseSample()
-        guard vc_alvr_get_head_pose(sampleTimestampNs, &pose) else { return }
+        let trackingState: String
+        if vc_alvr_get_head_pose(sampleTimestampNs, &pose) {
+            trackingState = "valid"
+        } else {
+            trackingState = "lost"
+            return
+        }
         let bridgeTimestampNs = Self.epochNanoseconds()
+        // sample_timestamp_ns is the ALVR tracking-sample id this pose was resolved for. Vivecraft
+        // echoes it back on the rendered frame so the client reprojects (timewarp) against the
+        // exact pose that was rendered, instead of a newer sample (which causes lag/judder).
         let line = """
-        {"type":"pose","version":1,"timestamp_ns":\(bridgeTimestampNs),"position_m":[\(StereoMath.fmt(pose.position_x)),\(StereoMath.fmt(pose.position_y)),\(StereoMath.fmt(pose.position_z))],"orientation_xyzw":[\(StereoMath.fmt(pose.orientation_x)),\(StereoMath.fmt(pose.orientation_y)),\(StereoMath.fmt(pose.orientation_z)),\(StereoMath.fmt(pose.orientation_w))],"tracking_state":"valid","recenter_counter":\(recenterCounter)}
+        {"type":"pose","version":1,"timestamp_ns":\(bridgeTimestampNs),"sample_timestamp_ns":\(sampleTimestampNs),"position_m":[\(StereoMath.fmt(pose.position_x)),\(StereoMath.fmt(pose.position_y)),\(StereoMath.fmt(pose.position_z))],"orientation_xyzw":[\(StereoMath.fmt(pose.orientation_x)),\(StereoMath.fmt(pose.orientation_y)),\(StereoMath.fmt(pose.orientation_z)),\(StereoMath.fmt(pose.orientation_w))],"tracking_state":"\(trackingState)","recenter_counter":\(recenterCounter)}
         """
         onUplinkLine?(line + "\n")
+
+        // Diagnostic: throttled head-pose log (VISIONCRAFT_LOG_POSE=1). Hold the head still and watch
+        // whether orientation drifts — distinguishes a runaway upstream pose (AVP/ARKit/host) from a
+        // downstream application bug in Vivecraft. Off by default.
+        if Self.logPoseEnabled {
+            let now = Self.epochNanoseconds()
+            if now &- lastPoseLogNs > 250_000_000 {
+                lastPoseLogNs = now
+                let yawDeg = atan2(2 * (pose.orientation_w * pose.orientation_y
+                    + pose.orientation_x * pose.orientation_z),
+                    1 - 2 * (pose.orientation_y * pose.orientation_y
+                    + pose.orientation_z * pose.orientation_z)) * 180 / .pi
+                NSLog("[VisionCraft] pose yaw=%.1f deg pos=[%.3f,%.3f,%.3f] quat=[%.4f,%.4f,%.4f,%.4f]",
+                      yawDeg, pose.position_x, pose.position_y, pose.position_z,
+                      pose.orientation_x, pose.orientation_y, pose.orientation_z, pose.orientation_w)
+            }
+        }
+    }
+
+    private static let logPoseEnabled = ProcessInfo.processInfo.environment["VISIONCRAFT_LOG_POSE"] == "1"
+    private var lastPoseLogNs: UInt64 = 0
+
+    private static func fovIsFinite(_ f: VCAlvrFov) -> Bool {
+        f.left.isFinite && f.right.isFinite && f.up.isFinite && f.down.isFinite
     }
 
     private func publishViewConfig(_ event: VCAlvrEvent) {
+        // The client's first ViewsConfig can be a placeholder with NaN FOV / ipd≈0. Forwarding it
+        // would poison Java's view_config (and the capture header) and produce NaN projections.
+        // Reject non-finite configs and keep the last good one.
+        guard Self.fovIsFinite(event.left_fov), Self.fovIsFinite(event.right_fov),
+              event.ipd_m.isFinite, event.ipd_m > 0 else {
+            return
+        }
+        lastViewConfigLeftFov = event.left_fov
+        lastViewConfigRightFov = event.right_fov
+        lastViewConfigIpdM = event.ipd_m
         let left = Self.tangents(from: event.left_fov)
         let right = Self.tangents(from: event.right_fov)
         let eyes = [
             StereoMath.EyeView(index: 0, tangents: left, width: viewConfigEyeWidth, height: viewConfigEyeHeight),
             StereoMath.EyeView(index: 1, tangents: right, width: viewConfigEyeWidth, height: viewConfigEyeHeight)
         ]
+        lastViewConfigPublishNs = Self.epochNanoseconds()
         onUplinkLine?(StereoMath.viewConfigJSON(eyes: eyes, ipdMeters: event.ipd_m))
     }
 

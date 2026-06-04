@@ -10,6 +10,20 @@ loom {
             setConfigName('Fabric Client')
             ideConfigGenerated(true)
             runDir('runs/client')
+            vmArgs('-XX:+UseZGC', '-Xmx6G')
+            // Forward the stereo bisection knob from the Gradle invocation to the client JVM, e.g.
+            // ./gradlew :fabric:runClient -Dvisioncraft.ipdScale=0  (0 = mono, 1 = device IPD).
+            if (System.getProperty('visioncraft.ipdScale') != null) {
+                vmArg("-Dvisioncraft.ipdScale=${System.getProperty('visioncraft.ipdScale')}")
+            }
+            // Forward the per-eye frame dump knobs, e.g.
+            // ./gradlew :fabric:runClient -Dvisioncraft.dumpFrames=4 -Dvisioncraft.dumpDir=/abs/path
+            if (System.getProperty('visioncraft.dumpFrames') != null) {
+                vmArg("-Dvisioncraft.dumpFrames=${System.getProperty('visioncraft.dumpFrames')}")
+            }
+            if (System.getProperty('visioncraft.dumpDir') != null) {
+                vmArg("-Dvisioncraft.dumpDir=${System.getProperty('visioncraft.dumpDir')}")
+            }
         }
         server {
             server()

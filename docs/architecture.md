@@ -47,7 +47,7 @@ flowchart TB
 ## Data flow (per frame)
 
 1. ALVRClient reports head pose, view configuration, and raw controller inputs through `alvr_server_core`.
-2. Host sends `pose`, `view_config`, and `controller` JSON → Java `ApplePoseProvider` / `AppleInputProvider`.
+2. Host sends `pose`, `view_config`, and `controller` JSON → Java `ApplePoseProvider` / `AppleInputProvider`. While ALVR is connecting, the host keeps the bridge session in `paused` and only sends `ready` after tracking + negotiated `view_config` dimensions match the encoder target.
 3. Vivecraft updates HMD matrices, controller actions, and triggers left/right render passes.
 4. Minecraft renders to eye framebuffers (OpenGL).
 5. `AppleFrameSubmitter` readbacks RGBA8 (MVP) and sends `frame` JSON + buffers.

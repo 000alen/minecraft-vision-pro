@@ -11,6 +11,39 @@ import static org.junit.jupiter.api.Assertions.*;
 class BridgeIntegrationTest {
 
     @Test
+    void mockHostPublishesPausedBeforeReady() throws Exception {
+        try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
+            host.start();
+            try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", host.getBoundPort())) {
+                bridge.connect();
+                boolean sawPaused = false;
+                long deadline = System.currentTimeMillis() + 5_000;
+                while (System.currentTimeMillis() < deadline) {
+                    if (bridge.getSessionState() == AppleNativeBridge.SessionState.PAUSED) {
+                        sawPaused = true;
+                    }
+                    if (bridge.getSessionState() == AppleNativeBridge.SessionState.READY) {
+                        break;
+                    }
+                    Thread.sleep(5);
+                }
+                assertTrue(sawPaused, "expected paused warmup before ready");
+                assertEquals(AppleNativeBridge.SessionState.READY, bridge.getSessionState());
+            }
+        }
+    }
+
+    @Test
+    void framesBlockedUntilSessionReady() {
+        try (AppleNativeBridge bridge = new AppleNativeBridge("127.0.0.1", 1)) {
+            bridge.setConnectedAndSessionForTesting(AppleNativeBridge.SessionState.PAUSED);
+            assertFalse(bridge.canSendFrames());
+            bridge.setConnectedAndSessionForTesting(AppleNativeBridge.SessionState.READY);
+            assertTrue(bridge.canSendFrames());
+        }
+    }
+
+    @Test
     void clientSendsStereoFrameAndReceivesPose() throws Exception {
         try (MockVisionCraftHost host = MockVisionCraftHost.bindEphemeral()) {
             host.start();

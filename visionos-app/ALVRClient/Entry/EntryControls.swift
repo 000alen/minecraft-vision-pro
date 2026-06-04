@@ -100,7 +100,7 @@ struct EntryControls: View {
                         switch await openImmersiveSpace(id: "RealityKitClient") {
                         case .opened:
                             immersiveSpaceIsShown = true
-                            entryMessage = "Immersive stream opened. Start Minecraft or the test sender if frames are not visible yet."
+                            entryMessage = "Full VR stream open. For ALVR-only test: Mac `scripts/vc.sh synthetic`. Stable = edge bars + checkerboard."
                         case .userCancelled:
                             immersiveSpaceIsShown = false
                             model.isShowingClient = false
@@ -119,7 +119,7 @@ struct EntryControls: View {
                         switch await openImmersiveSpace(id: "MetalClient") {
                         case .opened:
                             immersiveSpaceIsShown = true
-                            entryMessage = "Immersive stream opened. Start Minecraft or the test sender if frames are not visible yet."
+                            entryMessage = "Full VR stream open. For ALVR-only test: Mac `scripts/vc.sh synthetic`. Stable = edge bars + checkerboard."
                         case .userCancelled:
                             immersiveSpaceIsShown = false
                             model.isShowingClient = false

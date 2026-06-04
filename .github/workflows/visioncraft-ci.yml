@@ -7,6 +7,14 @@ on:
     branches: [main]
 
 jobs:
+  prepare-alvr-source:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify vendored ALVR tree (monorepo)
+        run: ./scripts/prepare-alvr.sh --check-source
+
   bridge-tests:
     runs-on: ubuntu-latest
     steps:

@@ -82,6 +82,10 @@ public class GarbageCollectorScreen extends Screen implements ChangeableParentSc
     @Override
     public void onClose() {
         ClientDataHolderVR.getInstance().cachedScreen = null;
-        this.minecraft.setScreen(this.lastScreen);
+        if (this.lastScreen != null && this.lastScreen != this) {
+            this.minecraft.setScreen(this.lastScreen);
+        } else {
+            this.minecraft.setScreen(null);
+        }
     }
 }

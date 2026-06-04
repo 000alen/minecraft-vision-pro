@@ -1,0 +1,17 @@
+VisionCraft
+
+This project combines original VisionCraft code with vendored third-party components.
+
+## Vendored components
+
+| Component | Location | License |
+|-----------|----------|---------|
+| ALVR | `visionos-app/ALVR/` | See `visionos-app/ALVR/LICENSE` |
+| Vivecraft (fork) | `minecraft/VivecraftMod/` | See upstream Vivecraft / GPL terms in that tree |
+| ALVR visionOS client | `visionos-app/ALVRClient/` | Project source; ALVR client_core linkage per `visionos-app/VENDORED.md` |
+
+## Your responsibilities
+
+- Apple platform binaries require your own Apple Developer signing and provisioning.
+- Minecraft Java Edition and a valid license are required to run the game path.
+- Distribution of combined binaries may impose obligations from GPL/LGPL/MIT terms in the vendored trees; see [docs/distribution.md](docs/distribution.md).

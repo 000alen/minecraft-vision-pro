@@ -129,13 +129,19 @@ final class JavaBridgeServer {
             return
         }
         let bridge = BridgeConnection(connection: connection)
-        bridge.onFrame = { [weak self] left, right, w, h, frameId, renderOrientation in
+        bridge.onFrame = { [weak self] left, right, w, h, frameId, renderSampleTimestampNs in
             Task { @MainActor in
                 self?.appModel?.lastFrameId = frameId
                 self?.appModel?.framesReceived += 1
             }
+            // Debug capture: dump the raw per-eye RGBA8 exactly as received from Java, before any
+            // host processing. Copies the slices to contiguous Data. Off unless /debug/capture armed.
+            if FrameCapture.shared.wantsRecv {
+                FrameCapture.shared.captureReceived(left: Data(left), right: Data(right),
+                                                    width: w, height: h, frameId: frameId)
+            }
             self?.alvr?.submitFrame(left: left, right: right, eyeWidth: w, eyeHeight: h,
-                                    frameId: frameId, renderOrientation: renderOrientation)
+                                    frameId: frameId, renderSampleTimestampNs: renderSampleTimestampNs)
         }
         bridge.onLine = { [weak self] line in
             self?.handleClientLine(line, bridge: bridge)
@@ -252,7 +258,7 @@ final class JavaBridgeServer {
 
 private final class BridgeConnection {
     let connection: NWConnection
-    var onFrame: ((Data, Data, Int, Int, UInt64, [Float]?) -> Void)?
+    var onFrame: ((Data, Data, Int, Int, UInt64, UInt64) -> Void)?
     var onLine: ((String) -> Void)?
     var onClose: (() -> Void)?
 
@@ -397,12 +403,10 @@ private final class BridgeConnection {
         bridgeLogger.info("Frame metadata id=\(frameId) size=\(lw)x\(lh) payload=\(total)")
         guard buffer.count >= total else { return false }
 
-        // Optional render head orientation (ARKit world, xyzw) for client-side reprojection.
-        var renderOrientation: [Float]? = nil
-        if let arr = meta["render_orientation_xyzw"] as? [Any], arr.count == 4 {
-            let q = arr.compactMap { ($0 as? NSNumber)?.floatValue }
-            if q.count == 4 { renderOrientation = q }
-        }
+        // ALVR sample timestamp the frame was rendered for: Vivecraft echoes the pose's
+        // sample_timestamp_ns here, and the host submits the frame under it so the client matches
+        // the head pose it predicted for that sample. 0 ⇒ no correlation; the host drops the frame.
+        let renderSampleTimestampNs = (meta["timestamp_ns"] as? NSNumber)?.uint64Value ?? 0
 
         // Frame the payload using byte_length (authoritative for the wire), but only
         // hand a frame to the renderer when the declared bytes actually match the
@@ -415,7 +419,11 @@ private final class BridgeConnection {
             // slices directly — no extra ~10 MB/eye copy before the GPU upload.
             // Compaction below happens only after the handler returns.
             onFrame?(buffer.prefix(leftLen), buffer.dropFirst(leftLen).prefix(rightLen), lw, lh,
-                     frameId, renderOrientation)
+                     frameId, renderSampleTimestampNs)
+        } else {
+            bridgeLogger.warning(
+                "Frame payload dropped id=\(frameId): metadata \(lw)x\(lh) rgba8=\(expectedLeftBytes ?? -1)+\(expectedRightBytes ?? -1) bytes, wire byte_length=\(leftLen)+\(rightLen)"
+            )
         }
         buffer.removeFirst(total)
         return true

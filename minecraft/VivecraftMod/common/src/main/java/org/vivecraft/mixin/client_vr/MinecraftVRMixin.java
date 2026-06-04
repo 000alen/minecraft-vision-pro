@@ -66,6 +66,7 @@ import org.vivecraft.client.utils.ClientUtils;
 import org.vivecraft.client.utils.TextUtils;
 import org.vivecraft.client.utils.UpdateChecker;
 import org.vivecraft.client_vr.ClientDataHolderVR;
+import org.vivecraft.client_vr.provider.apple.AppleVisionStartup;
 import org.vivecraft.client_vr.MethodHolder;
 import org.vivecraft.client_vr.VRState;
 import org.vivecraft.client_vr.extensions.GameRendererExtension;
@@ -75,6 +76,7 @@ import org.vivecraft.client_vr.gameplay.KeybindHandler;
 import org.vivecraft.client_vr.gameplay.screenhandlers.GuiHandler;
 import org.vivecraft.client_vr.gameplay.trackers.TelescopeTracker;
 import org.vivecraft.client_vr.provider.MCVR;
+import org.vivecraft.client_vr.provider.apple.AppleVisionStartup;
 import org.vivecraft.client_vr.provider.openvr_lwjgl.VRInputAction;
 import org.vivecraft.client_vr.render.MirrorNotification;
 import org.vivecraft.client_vr.render.RenderConfigException;
@@ -204,6 +206,9 @@ public abstract class MinecraftVRMixin implements MinecraftExtension {
         }
         boolean vrActive = !ClientDataHolderVR.getInstance().vrSettings.vrHotswitchingEnabled ||
             ClientDataHolderVR.getInstance().vr.isActive();
+        if (AppleVisionStartup.suppressVrRunning(Minecraft.getInstance())) {
+            vrActive = false;
+        }
         if (VRState.VR_RUNNING != vrActive && (ClientNetworking.SERVER_ALLOWS_VR_SWITCHING || this.player == null)) {
             // switch vr in the menu, or when allowed by the server
             vivecraft$switchVRState(vrActive);
@@ -333,7 +338,7 @@ public abstract class MinecraftVRMixin implements MinecraftExtension {
 
     @WrapOperation(method = "renderFrame", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/pipeline/RenderTarget;blitToScreen()V"))
     private void vivecraft$blitMirror(RenderTarget instance, Operation<Void> original) {
-        if (VRState.VR_RUNNING) {
+        if (VRState.VR_RUNNING && !AppleVisionStartup.suppressDesktopMirror(Minecraft.getInstance())) {
             Profiler.get().popPush("vrMirror");
             RenderPassManager.setMirrorRenderPass();
             ShaderHelper.drawMirror();

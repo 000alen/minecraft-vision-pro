@@ -45,6 +45,8 @@ public class AppleVisionStereoRenderer extends VRRenderer {
             this.resolution = new Tuple<>(this.eyeWidth, this.eyeHeight);
             VRSettings.LOGGER.info("Vivecraft: Apple Vision render res {}x{}", this.eyeWidth, this.eyeHeight);
             this.ss = -1.0F;
+        } else {
+            applyDeviceResolutionIfChanged();
         }
         return this.resolution;
     }
@@ -57,7 +59,9 @@ public class AppleVisionStereoRenderer extends VRRenderer {
     private int[] desiredEyeDims() {
         AppleNativeBridge.ViewConfig vc = provider.getBridge().getViewConfig();
         if (vc != null && vc.leftWidth() >= MIN_DIM && vc.leftHeight() >= MIN_DIM) {
-            return new int[]{clampDim(vc.leftWidth()), clampDim(vc.leftHeight())};
+            int w = clampDim(Math.max(vc.leftWidth(), vc.rightWidth()));
+            int h = clampDim(Math.max(vc.leftHeight(), vc.rightHeight()));
+            return new int[]{w, h};
         }
         return new int[]{DEFAULT_WIDTH, DEFAULT_HEIGHT};
     }
@@ -81,6 +85,7 @@ public class AppleVisionStereoRenderer extends VRRenderer {
             this.resolution = new Tuple<>(dims[0], dims[1]);
             this.ss = -1.0F;
             this.reinitFrameBuffers = true;
+            provider.resetFrameTransportOnResolutionChange();
         }
     }
 
@@ -140,6 +145,12 @@ public class AppleVisionStereoRenderer extends VRRenderer {
             loggedStreamingStarted = true;
         }
 
+        applyDeviceResolutionIfChanged();
+        if (this.reinitFrameBuffers) {
+            GL11.glFlush();
+            return;
+        }
+
         float near = 0.05f;
         float far = this.lastFarClip > 0 ? this.lastFarClip : 512f;
         // Raw ARKit-world head orientation (xyzw) this frame was rendered for. The viewer warps
@@ -150,12 +161,14 @@ public class AppleVisionStereoRenderer extends VRRenderer {
         if (pose != null && pose.isValid()) {
             renderOrientation = pose.orientationXyzw().clone();
         }
+        // ALVR sample timestamp of the pose this frame was rendered for. The host hands it to
+        // alvr_send_video_nal so the headset reprojects (timewarp) against the rendered pose
+        // instead of a newer tracking sample (otherwise the world lags/judders behind the head).
+        long renderSampleTimestampNs = provider.getPoseProvider().getRenderSampleTimestampNs();
         // submitEyeTextures never blocks on the network: the readback is queued to the
         // async sender thread, so the render thread is not coupled to socket backpressure.
         submitter.submitEyeTextures(LeftEyeTextureId, RightEyeTextureId, eyeWidth, eyeHeight, near, far,
-            renderOrientation);
-        // Pick up the device-recommended render size once the host reports it (next frame).
-        applyDeviceResolutionIfChanged();
+            renderOrientation, renderSampleTimestampNs);
         GL11.glFlush();
     }
 

@@ -19,6 +19,7 @@ import org.vivecraft.client.gui.screens.UpdateScreen;
 import org.vivecraft.client.utils.UpdateChecker;
 import org.vivecraft.client_vr.ClientDataHolderVR;
 import org.vivecraft.client_vr.VRState;
+import org.vivecraft.client_vr.provider.apple.AppleVisionStartup;
 
 @Mixin(TitleScreen.class)
 public abstract class TitleScreenMixin extends Screen {
@@ -47,6 +48,7 @@ public abstract class TitleScreenMixin extends Screen {
 
     @Unique
     private void vivecraft$addVRModeButton() {
+        AppleVisionStartup.tryEnableRememberedVrOnTitleScreen(this.minecraft);
         this.vivecraft$vrModeButton = new Button.Builder(Component.translatable("vivecraft.gui.vr",
             VRState.VR_ENABLED ? CommonComponents.OPTION_ON : CommonComponents.OPTION_OFF), (button) -> {
             VRState.VR_ENABLED = !VRState.VR_ENABLED;

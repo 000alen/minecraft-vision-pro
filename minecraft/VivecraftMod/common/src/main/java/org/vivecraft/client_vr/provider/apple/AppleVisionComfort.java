@@ -19,6 +19,9 @@ public final class AppleVisionComfort {
         }
         settings.allowStandingOriginOffset = false;
         settings.physicalKeyboard = true;
-        VRSettings.LOGGER.info("Vivecraft: Apple Vision comfort defaults applied (seated, HMD aim)");
+        // Desktop mirror is debug-only on Mac; CROPPED + tiny window shows a misleading color block.
+        settings.displayMirrorMode = VRSettings.MirrorMode.SINGLE;
+        settings.disableGarbageCollectorMessage = true;
+        VRSettings.LOGGER.info("Vivecraft: Apple Vision comfort defaults applied (seated, HMD aim, mirror=single)");
     }
 }

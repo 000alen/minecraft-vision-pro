@@ -24,6 +24,7 @@ import net.minecraft.util.profiling.Profiler;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL11;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -274,6 +275,33 @@ public abstract class GameRendererVRMixin
         if (!RenderPassType.isVanilla()) {
             VRShaders.setUndistortedProj(this.gameRenderState.levelRenderState.cameraRenderState.projectionMatrix);
         }
+    }
+
+    /**
+     * Force the per-eye asymmetric off-axis projection onto the matrix that is actually
+     * rasterized to the GPU. {@code Camera.extractRenderState} populates
+     * {@code cameraRenderState.projectionMatrix} with a symmetric projection (it no longer
+     * routes through {@code Projection.getMatrix}, so the WrapOperation in CameraVRMixin only
+     * affects culling / view-rotation). Without this, both eyes render the same symmetric
+     * frustum and the stereo image cannot fuse on an off-axis HMD (e.g. Apple Vision Pro).
+     *
+     * <p>The focal/shear terms (m00, m11, m20, m21) of a frustum matrix depend only on the
+     * per-eye tangents, not on the near/far planes, so copying them onto MC's matrix applies
+     * the correct off-axis skew while preserving MC's exact depth range untouched.
+     */
+    @Inject(method = "renderLevel", at = @At("HEAD"))
+    private void vivecraft$applyVrOffAxisProjection(CallbackInfo ci) {
+        if (RenderPassType.isVanilla()) {
+            return;
+        }
+        RenderPass pass = vivecraft$DATA_HOLDER.currentPass;
+        if (pass != RenderPass.LEFT && pass != RenderPass.RIGHT) {
+            return;
+        }
+        Matrix4f proj = this.gameRenderState.levelRenderState.cameraRenderState.projectionMatrix;
+        Matrix4f vr = vivecraft$DATA_HOLDER.vrRenderer.getCachedProjectionMatrix(
+            pass.ordinal(), proj.perspectiveNear(), proj.perspectiveFar());
+        proj.m00(vr.m00()).m11(vr.m11()).m20(vr.m20()).m21(vr.m21());
     }
 
     @WrapWithCondition(method = "renderLevel", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/CommandEncoder;clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V"))

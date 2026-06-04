@@ -900,30 +900,29 @@ class Renderer {
         var frameIsSuitableForDisplaying = true
         //print(EventHandler.shared.lastIpd, WorldTracker.shared.worldTrackingAddedOriginAnchor, EventHandler.shared.framesRendered)
         if EventHandler.shared.lastIpd == -1 || EventHandler.shared.framesRendered < Int(refreshRate) {
-            // Don't show frame if we haven't sent the view config and received frames
-            // with that config applied.
             frameIsSuitableForDisplaying = false
-            print("IPD is bad, no frame", EventHandler.shared.framesRendered)
         }
         if !WorldTracker.shared.worldTrackingAddedOriginAnchor && EventHandler.shared.framesRendered < 300 {
-            // Don't show frame if we haven't figured out our origin yet.
             frameIsSuitableForDisplaying = false
-            print("Origin is bad, no frame")
         }
         if EventHandler.shared.videoFormat == nil {
             frameIsSuitableForDisplaying = false
-            print("Missing video format, no frame")
         }
-        
+
+        let decoderHasFrame = EventHandler.shared.videoFormat != nil && queuedFrame != nil
         if !(renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil) {
-            // Things to do once if no frame is rendering (show the wireframe)
-            if EventHandler.shared.totalFramesRendered > 300 {
+            // Only show the wireframe when decode is actually idle — not during IPD/origin warmup.
+            if !decoderHasFrame && EventHandler.shared.totalFramesRendered > 300 {
                 fadeInOverlayAlpha += 0.02
+            } else if decoderHasFrame {
+                fadeInOverlayAlpha -= 0.04
+                if fadeInOverlayAlpha < 0.0 {
+                    fadeInOverlayAlpha = 0.0
+                }
             }
         }
         else {
-            // Things to do if a frame is rendering (fade wireframe, or show wireframe is reprojection is too long)
-            fadeInOverlayAlpha -= 0.01
+            fadeInOverlayAlpha -= 0.03
             if fadeInOverlayAlpha < 0.0 {
                 fadeInOverlayAlpha = 0.0
             }

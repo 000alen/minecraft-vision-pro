@@ -10,10 +10,14 @@ import visioncraft.bridge.BridgeMath;
  * Applies bridge head pose to Vivecraft HMD matrices (Minecraft Y-up).
  */
 public final class ApplePoseProvider {
+    private static final long POSE_STALE_NS = 250_000_000L;
+
     private final AppleNativeBridge bridge;
     private final Vector3f position = new Vector3f(0f, 1.62f, 0f);
     private final Quaternionf orientation = new Quaternionf();
     private int lastRecenterCounter;
+    /** ALVR sample timestamp of the pose last applied to the HMD (echoed on the rendered frame). */
+    private volatile long renderSampleTimestampNs = 0L;
 
     public ApplePoseProvider(AppleNativeBridge bridge) {
         this.bridge = bridge;
@@ -22,6 +26,11 @@ public final class ApplePoseProvider {
     public void poll() {
         AppleNativeBridge.Pose pose = bridge.getLatestPose();
         if (!pose.isValid()) {
+            return;
+        }
+        long now = System.nanoTime();
+        long poseAgeNs = pose.timestampNs() > 0 ? now - pose.timestampNs() : 0;
+        if (poseAgeNs > POSE_STALE_NS) {
             return;
         }
         float[] p = pose.positionM();
@@ -34,6 +43,16 @@ public final class ApplePoseProvider {
         BridgeMath.visionProToMinecraft(q);
         orientation.set(q[0], q[1], q[2], q[3]);
         lastRecenterCounter = pose.recenterCounter();
+        renderSampleTimestampNs = pose.sampleTimestampNs();
+    }
+
+    /**
+     * ALVR sample timestamp of the most recently applied head pose. The frame submitter tags the
+     * outgoing frame with this so the host can hand ALVR the timestamp the frame was rendered for,
+     * letting the client reproject (timewarp) against the correct pose instead of a newer one.
+     */
+    public long getRenderSampleTimestampNs() {
+        return renderSampleTimestampNs;
     }
 
     /**

@@ -23,8 +23,6 @@ final class StereoFrameEncoder {
         let frameId: UInt64
         let targetTimestampNs: UInt64
         let ptsNanos: UInt64
-        /// Head orientation (ARKit world, xyzw) the frame was rendered for, or `nil` if unknown.
-        let renderOrientation: [Float]?
     }
 
     private struct PendingFrame {
@@ -34,11 +32,13 @@ final class StereoFrameEncoder {
         let eyeHeight: Int
         let frameId: UInt64
         let targetTimestampNs: UInt64
-        let renderOrientation: [Float]?
     }
 
     /// Called on the encoder queue for each compressed access unit.
     var onAccessUnit: ((AccessUnit) -> Void)?
+
+    /// Annex-B VPS/SPS/PPS from the latest keyframe (for ALVR DecoderConfig fallback).
+    var onDecoderConfigAnnexB: ((Data) -> Void)?
 
     private let queue = DispatchQueue(label: "visioncraft.encoder")
     private var session: VTCompressionSession?
@@ -49,6 +49,10 @@ final class StereoFrameEncoder {
     private var forceKeyframeNext = true
     private var pendingFrame: PendingFrame?
     private var encodeInFlight = false
+    private var cachedDecoderConfigAnnexB = Data()
+    // Self-decode session used only by the debug frame-capture roundtrip.
+    private var decodeSession: VTDecompressionSession?
+    private var decodeFormat: CMFormatDescription?
 
     // MARK: - Lifecycle
 
@@ -62,6 +66,21 @@ final class StereoFrameEncoder {
         queue.async { self.forceKeyframeNext = true }
     }
 
+    func setAverageBitrate(_ bitsPerSecond: Int) {
+        queue.async {
+            guard let session = self.session, bitsPerSecond > 0 else { return }
+            VTSessionSetProperty(
+                session,
+                key: kVTCompressionPropertyKey_AverageBitRate,
+                value: NSNumber(value: bitsPerSecond) as CFTypeRef
+            )
+        }
+    }
+
+    func decoderConfigAnnexB() -> Data {
+        queue.sync { cachedDecoderConfigAnnexB }
+    }
+
     func stop() {
         queue.async {
             if let session = self.session {
@@ -69,6 +88,11 @@ final class StereoFrameEncoder {
                 VTCompressionSessionInvalidate(session)
             }
             self.session = nil
+            if let decode = self.decodeSession {
+                VTDecompressionSessionInvalidate(decode)
+                self.decodeSession = nil
+                self.decodeFormat = nil
+            }
             self.eyeWidth = 0
             self.eyeHeight = 0
             self.pendingFrame = nil
@@ -80,7 +104,7 @@ final class StereoFrameEncoder {
 
     /// Pack + encode one stereo pair. `left`/`right` are RGBA8, `eyeWidth × eyeHeight` each.
     func encode(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64,
-                targetTimestampNs: UInt64, renderOrientation: [Float]? = nil) {
+                targetTimestampNs: UInt64) {
         // Copy out of any caller-owned/transient storage so the async work is self-contained.
         let frame = PendingFrame(
             left: Data(left),
@@ -88,8 +112,7 @@ final class StereoFrameEncoder {
             eyeWidth: eyeWidth,
             eyeHeight: eyeHeight,
             frameId: frameId,
-            targetTimestampNs: targetTimestampNs,
-            renderOrientation: renderOrientation
+            targetTimestampNs: targetTimestampNs
         )
         queue.async {
             // Latest-frame-wins: if VideoToolbox is still encoding, replace any
@@ -172,8 +195,7 @@ final class StereoFrameEncoder {
         encodeInFlight = true
         if !encodeLocked(left: frame.left, right: frame.right, eyeWidth: frame.eyeWidth,
                          eyeHeight: frame.eyeHeight, frameId: frame.frameId,
-                         targetTimestampNs: frame.targetTimestampNs,
-                         renderOrientation: frame.renderOrientation) {
+                         targetTimestampNs: frame.targetTimestampNs) {
             encodeInFlight = false
             encodeLatestPendingIfIdleLocked()
         }
@@ -181,7 +203,7 @@ final class StereoFrameEncoder {
 
     @discardableResult
     private func encodeLocked(left: Data, right: Data, eyeWidth: Int, eyeHeight: Int, frameId: UInt64,
-                              targetTimestampNs: UInt64, renderOrientation: [Float]?) -> Bool {
+                              targetTimestampNs: UInt64) -> Bool {
         if session == nil || self.eyeWidth != eyeWidth || self.eyeHeight != eyeHeight {
             configureLocked(eyeWidth: eyeWidth, eyeHeight: eyeHeight, fps: fps)
         }
@@ -222,6 +244,14 @@ final class StereoFrameEncoder {
         }
         CVPixelBufferUnlockBaseAddress(pb, [])
 
+        // Debug capture: dump the exact side-by-side BGRA buffer that gets HEVC-encoded.
+        // `forceKeyframeNext` is still the pre-encode value here (reset below), so it reflects
+        // whether this frame is being forced to an IDR. Off unless /debug/capture armed.
+        if FrameCapture.shared.wantsSbs {
+            FrameCapture.shared.captureSBS(pb, frameId: frameId, eyeWidth: eyeWidth, eyeHeight: eyeHeight,
+                                           targetTimestampNs: targetTimestampNs, keyframe: forceKeyframeNext)
+        }
+
         let pts = CMTime(value: frameIndex, timescale: fps)
         let duration = CMTime(value: 1, timescale: fps)
         frameIndex += 1
@@ -249,15 +279,14 @@ final class StereoFrameEncoder {
                 }
                 guard status == noErr, let sample else { return }
                 self.handleEncoded(sample: sample, frameId: frameId,
-                                   targetTimestampNs: targetTimestampNs, ptsNanos: ptsNanos,
-                                   renderOrientation: renderOrientation)
+                                   targetTimestampNs: targetTimestampNs, ptsNanos: ptsNanos)
             }
         }
         return status == noErr
     }
 
     private func handleEncoded(sample: CMSampleBuffer, frameId: UInt64, targetTimestampNs: UInt64,
-                               ptsNanos: UInt64, renderOrientation: [Float]?) {
+                               ptsNanos: UInt64) {
         guard CMSampleBufferDataIsReady(sample) else { return }
 
         let keyframe = Self.isKeyframe(sample)
@@ -265,10 +294,16 @@ final class StereoFrameEncoder {
         let startCode: [UInt8] = [0, 0, 0, 1]
 
         if keyframe, let format = CMSampleBufferGetFormatDescription(sample) {
+            var config = Data()
             for paramSet in Self.hevcParameterSets(format) {
-                au.append(contentsOf: startCode)
-                au.append(paramSet)
+                config.append(contentsOf: startCode)
+                config.append(paramSet)
             }
+            if !config.isEmpty {
+                cachedDecoderConfigAnnexB = config
+                onDecoderConfigAnnexB?(config)
+            }
+            au.append(config)
         }
 
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sample) else { return }
@@ -294,9 +329,53 @@ final class StereoFrameEncoder {
         }
 
         guard !au.isEmpty else { return }
+
+        // Debug capture: self-decode this access unit to validate the encoded bitstream. The
+        // /debug/capture endpoint forces an IDR on arm, and we decode every armed frame in order on
+        // this queue, so the decode session's reference chain stays intact for delta frames.
+        if FrameCapture.shared.wantsDecoded {
+            decodeForCapture(sample: sample, frameId: frameId)
+        }
+
         onAccessUnit?(AccessUnit(data: au, keyframe: keyframe, frameId: frameId,
-                                 targetTimestampNs: targetTimestampNs, ptsNanos: ptsNanos,
-                                 renderOrientation: renderOrientation))
+                                 targetTimestampNs: targetTimestampNs, ptsNanos: ptsNanos))
+    }
+
+    /// Decode `sample` (HVCC, the encoder's native output) with a self-managed decompression session
+    /// and hand the decoded BGRA pixel buffer to `FrameCapture`. Queue-confined.
+    private func decodeForCapture(sample: CMSampleBuffer, frameId: UInt64) {
+        guard let format = CMSampleBufferGetFormatDescription(sample) else { return }
+        if decodeSession == nil || decodeFormat == nil
+            || !CMFormatDescriptionEqual(decodeFormat!, otherFormatDescription: format) {
+            if let existing = decodeSession {
+                VTDecompressionSessionInvalidate(existing)
+                decodeSession = nil
+            }
+            var created: VTDecompressionSession?
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+            ]
+            let status = VTDecompressionSessionCreate(
+                allocator: kCFAllocatorDefault, formatDescription: format,
+                decoderSpecification: nil, imageBufferAttributes: attrs as CFDictionary,
+                outputCallback: nil, decompressionSessionOut: &created)
+            guard status == noErr, let created else {
+                NSLog("[VisionCraft] FrameCapture decode session create failed: \(status)")
+                return
+            }
+            decodeSession = created
+            decodeFormat = format
+        }
+        guard let session = decodeSession else { return }
+        let flags: VTDecodeFrameFlags = [._EnableTemporalProcessing]
+        VTDecompressionSessionDecodeFrame(
+            session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil
+        ) { status, _, imageBuffer, _, _ in
+            guard status == noErr, let imageBuffer else { return }
+            FrameCapture.shared.captureDecoded(imageBuffer, frameId: frameId)
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(session)
     }
 
     // MARK: - Helpers

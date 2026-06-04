@@ -5,10 +5,12 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.util.profiling.Profiler;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
+import org.joml.Quaternionf;
 import org.joml.Vector2f;
 import org.joml.Vector2fc;
 import org.joml.Vector3f;
 import org.lwjgl.glfw.GLFW;
+import org.vivecraft.api.client.data.RenderPass;
 import org.vivecraft.client.VivecraftVRMod;
 import org.vivecraft.client_vr.ClientDataHolderVR;
 import org.vivecraft.client_vr.MethodHolder;
@@ -18,6 +20,7 @@ import org.vivecraft.client_vr.provider.openvr_lwjgl.VRInputAction;
 import org.vivecraft.client_vr.settings.VRSettings;
 import org.vivecraft.common.utils.MathUtils;
 import visioncraft.bridge.AppleNativeBridge;
+import visioncraft.bridge.BridgeMath;
 import visioncraft.bridge.BridgeSettings;
 
 import java.io.IOException;
@@ -34,6 +37,14 @@ public class AppleVisionProvider extends MCVR {
     private static final long RECONNECT_INTERVAL_NS = 1_000_000_000L;
     private static final int RECONNECT_TIMEOUT_MS = 250;
     private static final long STALE_HAND_INPUT_NS = 250_000_000L;
+    // Heartbeat is time-based, not frame-count based: a frame-count ping (every N frames) drops
+    // below the responsiveness window at low fps and triggers a self-inflicted reconnect loop.
+    // Ping ~2x/second; only declare the bridge dead after several missed pongs.
+    private static final long HEARTBEAT_INTERVAL_NS = 500_000_000L;
+    private static final long BRIDGE_RESPONSIVE_WINDOW_NS = 5_000_000_000L;
+    // Stereo eye-separation multiplier for "doubled image" bisection (1.0 = device IPD, 0.0 = mono).
+    private static final float IPD_SCALE =
+        Float.parseFloat(System.getProperty("visioncraft.ipdScale", "1.0"));
 
     // Pinch → mouse hysteresis: engage on a firm pinch, hold until clearly released, so a
     // hand hovering near the threshold can't chatter the attack/use action.
@@ -52,7 +63,10 @@ public class AppleVisionProvider extends MCVR {
     private AppleFrameSubmitter frameSubmitter;
     private boolean vrActive = true;
     private long nextReconnectAttemptNs = 0L;
+    private long lastPingNs = 0L;
     private boolean bridgeWasDisconnected = false;
+    private boolean loggedStereoGeometry = false;
+    private AppleNativeBridge.SessionState lastBridgeSessionState = AppleNativeBridge.SessionState.CLOSED;
 
     public AppleVisionProvider(Minecraft mc, ClientDataHolderVR dh) {
         super(mc, dh, VivecraftVRMod.INSTANCE);
@@ -63,6 +77,13 @@ public class AppleVisionProvider extends MCVR {
 
     public static AppleVisionProvider get() {
         return instance;
+    }
+
+    /** Clears in-flight PBO readbacks after a device view_config resize. */
+    void resetFrameTransportOnResolutionChange() {
+        if (this.frameSubmitter != null) {
+            this.frameSubmitter.resetFrameIds();
+        }
     }
 
     @Override
@@ -114,9 +135,52 @@ public class AppleVisionProvider extends MCVR {
      * pose pre-multiplied in. This mirrors the OpenVR backend's eye-to-head matrices.
      */
     private void applyEyeOffsets() {
-        float ipd = getIPD();
+        // Debug knob to bisect the "doubled image" symptom: -Dvisioncraft.ipdScale=0 forces mono
+        // (eyes coincident), 1.0 is the device IPD. Lets us confirm whether divergence is the cause
+        // and find a fuseable separation without a full rebuild per attempt.
+        float ipd = getIPD() * IPD_SCALE;
         this.hmdPoseLeftEye.identity().m30(-ipd * 0.5F);
         this.hmdPoseRightEye.identity().m30(ipd * 0.5F);
+    }
+
+    /** One-shot stereo geometry dump once the device view_config and a pose are available. */
+    private void logStereoGeometryOnce() {
+        if (loggedStereoGeometry) {
+            return;
+        }
+        AppleNativeBridge.ViewConfig vc = bridge.getViewConfig();
+        if (vc == null) {
+            return;
+        }
+        float[] lt = vc.tangentsForEye(0);
+        float[] rt = vc.tangentsForEye(1);
+        // The host emits a placeholder view_config (NaN tangents, ipd≈0.1) on connect, before the
+        // ALVR client reports its real per-eye FOV. Wait for finite tangents so we log the geometry
+        // that actually renders, not the transient placeholder.
+        if (!allFinite(lt) || !allFinite(rt)) {
+            return;
+        }
+        loggedStereoGeometry = true;
+        Vector3f left = getEyePosition(RenderPass.LEFT);
+        Vector3f right = getEyePosition(RenderPass.RIGHT);
+        float sep = left.distance(right);
+        VRSettings.LOGGER.info(
+            "Vivecraft: Apple stereo geometry — ipd_m={} ipdScale={} eyeSepBlocks={} "
+                + "leftTan[L,R,U,D]=[{}, {}, {}, {}] rightTan[L,R,U,D]=[{}, {}, {}, {}]",
+            getIPD(), IPD_SCALE, sep,
+            lt[0], lt[1], lt[2], lt[3], rt[0], rt[1], rt[2], rt[3]);
+    }
+
+    private static boolean allFinite(float[] v) {
+        if (v == null) {
+            return false;
+        }
+        for (float f : v) {
+            if (!Float.isFinite(f)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
@@ -154,11 +218,33 @@ public class AppleVisionProvider extends MCVR {
             return;
         }
         ensureBridgeConnected();
+        if (bridge.isConnected()) {
+            long now = System.nanoTime();
+            if (now - lastPingNs >= HEARTBEAT_INTERVAL_NS) {
+                lastPingNs = now;
+                try {
+                    bridge.ping(now);
+                } catch (IOException ignored) {
+                }
+            }
+            if (!bridge.isBridgeResponsive(BRIDGE_RESPONSIVE_WINDOW_NS)) {
+                bridge.close();
+                ensureBridgeConnected();
+            }
+        }
         sessionState.updateFromBridge(bridge);
+        AppleNativeBridge.SessionState bridgeSession = bridge.getSessionState();
+        if (frameSubmitter != null
+            && bridgeSession == AppleNativeBridge.SessionState.READY
+            && lastBridgeSessionState != AppleNativeBridge.SessionState.READY) {
+            frameSubmitter.resetFrameIds();
+        }
+        lastBridgeSessionState = bridgeSession;
         Profiler.get().push("applePose");
         poseProvider.poll();
         poseProvider.applyToHmd(hmdPose, hmdRotation);
         applyEyeOffsets();
+        logStereoGeometryOnce();
         if (poseProvider.consumeRecenterEvent()) {
             this.seatedRot = 0f;
             VRSettings.LOGGER.info("Vivecraft: Apple Vision recenter applied");
@@ -180,6 +266,9 @@ public class AppleVisionProvider extends MCVR {
 
     /** Head-forward ray for crosshair / block interaction without motion controllers. */
     private void updateFakeControllers() {
+        if (inputProvider.hasFreshControllerState()) {
+            return;
+        }
         Matrix4f forward = new Matrix4f(this.hmdPose).translate(0f, 0f, -CROSSHAIR_FORWARD_BLOCKS);
         this.controllerPose[MAIN_CONTROLLER].set(forward);
         this.controllerPose[OFFHAND_CONTROLLER].set(forward);
@@ -191,6 +280,25 @@ public class AppleVisionProvider extends MCVR {
         this.handRotation[OFFHAND_CONTROLLER].set(this.hmdRotation);
         this.deviceSource[MAIN_CONTROLLER].set(DeviceSource.Source.APPLE, MAIN_CONTROLLER);
         this.deviceSource[OFFHAND_CONTROLLER].set(DeviceSource.Source.APPLE, OFFHAND_CONTROLLER);
+    }
+
+    void applyBridgeControllerPose(ControllerType hand, AppleNativeBridge.Controller controller) {
+        if (!controller.tracked()) {
+            return;
+        }
+        int idx = hand == ControllerType.LEFT ? OFFHAND_CONTROLLER : MAIN_CONTROLLER;
+        float[] p = controller.positionM();
+        float[] q = controller.orientationXyzw().clone();
+        BridgeMath.visionProToMinecraft(q);
+        Vector3f pos = new Vector3f(
+            BridgeMath.metersToBlocks(p[0]),
+            BridgeMath.metersToBlocks(p[1]),
+            BridgeMath.metersToBlocks(p[2])
+        );
+        Quaternionf rot = new Quaternionf(q[0], q[1], q[2], q[3]);
+        this.controllerPose[idx].identity().rotate(rot).setTranslation(pos);
+        this.controllerRotation[idx].set(rot);
+        this.controllerTracking[idx] = true;
     }
 
     @Override
@@ -383,6 +491,10 @@ public class AppleVisionProvider extends MCVR {
 
     public AppleNativeBridge getBridge() {
         return bridge;
+    }
+
+    public ApplePoseProvider getPoseProvider() {
+        return poseProvider;
     }
 
     public boolean isHostSessionReady() {

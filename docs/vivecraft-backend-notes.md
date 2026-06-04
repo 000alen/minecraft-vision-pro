@@ -59,6 +59,16 @@ Apple provider and bridge live directly in `minecraft/VivecraftMod/` (no separat
 
 With `APPLE_VISION` selected, `MCOpenVR` must not load. Do not initialize LWJGL OpenVR bindings on this path.
 
+## Apple Vision Mac boot
+
+**Symptom:** During the red Mojang splash, the Mac window shows a gray or black block in one corner (often bottom-left). It looks like the empty view on the headset. The window may close and reopen once.
+
+**Cause:** `rememberVr` used to set `VRState.VR_ENABLED` on the first resource reload while the splash was still visible. That ran full VR init, toggled `VR_RUNNING` (which resizes the GLFW window), and blitted empty eye framebuffers to the desktop mirror before the title screen.
+
+**Fix:** `AppleVisionStartup` defers remembered VR until `TitleScreen` and keeps `VR_RUNNING` off while the loading overlay or pre-title boot UI is active. Start `scripts/vc.sh host` before Minecraft so bridge connect succeeds when VR turns on at the title screen.
+
+**OOTB:** `scripts/vc.sh minecraft` after `scripts/vc.sh host` + ALVRClient connected. No action needed on the splash; use F7 on the title screen only if VR is off.
+
 ## GUI / crosshair (M4/M5)
 
 - Aim device: HMD (`VRSettings.AimDevice.HMD`)

@@ -191,7 +191,7 @@ class EventHandler: ObservableObject {
                 refreshRates = [120, 100, 96, 90]
             }
 
-            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: false)
+            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: false, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: false)
             alvr_initialize(/*capabilities=*/capabilities)
             alvr_initialize_logging()
             alvr_set_decoder_input_callback(nil, { data in return EventHandler.shared.handleNals(frameData: data) })
@@ -229,6 +229,7 @@ class EventHandler: ObservableObject {
     func stop() {
         print("EventHandler.Stop")
         streamingActive = false
+        renderStarted = false
         vtDecompressionSession = nil
         videoFormat = nil
         lastRequestedTimestamp = 0
@@ -412,9 +413,11 @@ class EventHandler: ObservableObject {
     func eventsWatchdog() {
         while true {
             if eventHeartbeat == lastEventHeartbeat {
-                if (renderStarted && numberOfEventThreadRestarts > 3) || numberOfEventThreadRestarts > 10 {
-                    print("Event thread is MIA, exiting")
-                    exit(0)
+                if numberOfEventThreadRestarts > 10 {
+                    print("Event thread is MIA too many times; stopping stream")
+                    self.streamingActive = false
+                    self.renderStarted = false
+                    self.stop()
                 }
                 else {
                     print("Event thread is MIA, restarting event thread")
@@ -430,14 +433,16 @@ class EventHandler: ObservableObject {
             DispatchQueue.main.async {
                 let state = UIApplication.shared.applicationState
                 if state == .background {
-                    print("App in background, exiting")
+                    print("App in background; pausing stream")
                     if let service = self.mdnsListener {
                         service.cancel()
                         self.mdnsListener = nil
                         self.mdnsListenerRegistered = false
                         self.mdnsListenerReady = false
                     }
-                    exit(0)
+                    self.streamingActive = false
+                    self.renderStarted = false
+                    self.stop()
                 }
             }
             
@@ -490,7 +495,9 @@ class EventHandler: ObservableObject {
             self.stutterSampleStart = CACurrentMediaTime()
             
             if self.stutterEventsCounted >= 50 {
-                print("stutter detected!")
+                print("stutter detected; resetting decoder")
+                resetEncoding()
+                self.stutterEventsCounted = 0
             }
             
             self.stutterEventsCounted = 0
@@ -551,7 +558,7 @@ class EventHandler: ObservableObject {
                 }
                 //print("Frame decoded")
                 
-                if (CACurrentMediaTime() - startedDecodeTime > Double(50*MSEC_PER_SEC)) {
+                if (CACurrentMediaTime() - startedDecodeTime > Double(50 * NSEC_PER_MSEC) / Double(NSEC_PER_SEC)) {
                     objc_sync_enter(frameQueueLock)
 
                     print("Handle decode overrun!", CACurrentMediaTime() - startedDecodeTime, framesSinceLastDecode, framesSinceLastIDR, ns_diff_from_last_req_ts)
@@ -570,7 +577,7 @@ class EventHandler: ObservableObject {
 
                 objc_sync_enter(frameQueueLock)
                 framesSinceLastDecode = 0
-                if frameQueueLastTimestamp != timestamp || true
+                if frameQueueLastTimestamp != timestamp
                 {
                     alvr_report_frame_decoded(timestamp)
                     
@@ -851,6 +858,7 @@ class EventHandler: ObservableObject {
                 Settings.clearSettingsCache()
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:
                 print("streaming stopped")
+                renderStarted = false
                 if streamingActive {
                     streamingActive = false
                     stop()

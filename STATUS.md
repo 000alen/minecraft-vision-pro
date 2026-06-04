@@ -1,6 +1,6 @@
 # VisionCraft status
 
-Last updated: 2026-06-02
+Last updated: 2026-06-03
 
 > Current runtime path: Mac ALVR host (`VisionCraftHost`) + ALVR `server_core` + VisionCraft headset client (`ALVRClient`).
 > Source-control model: the vendored ALVR version and VisionCraft ALVR changes live under `visionos-app/`; prepare scripts validate/build artifacts only.
@@ -55,6 +55,14 @@ scripts/vc.sh verify
 ```
 
 Synthetic frames prove host -> ALVR -> AVP without Java or Minecraft. Then validate the test-pattern sender with `scripts/vc.sh test-sender`, then Minecraft with `scripts/vc.sh minecraft`, press F7, and run the controller checklist in `docs/runbook.md`.
+
+## 2026-06-03 audit remediation (code)
+
+- Bridge session warmup: Mac host sends `paused` on ALVR connect, then `ready` after tracking + `view_config`; Java `sendFrame` is gated on `ready`.
+- Control API: `/status` exposes `bridge_streaming_ready`, `sent_video_config`, `frames_dropped_no_config`; `scripts/vc.sh verify` checks `alvr_frames_sent` and encoder counters.
+- Java bridge: UTF-8 line reader, ping/pong watchdog, pose staleness (250 ms), controller pose wiring, frame id reset on `ready`.
+- ALVRClient: foveation disabled in capabilities, decode overrun threshold fixed, `renderStarted` cleared on stream stop, stutter path calls `resetEncoding()`.
+- Docs: [docs/alvr-render-orientation.md](docs/alvr-render-orientation.md) (no `render_orientation` on HEVC path); [NOTICE](NOTICE); [docs/distribution.md](docs/distribution.md).
 
 ## 2026-06-02 hardware hardening findings
 

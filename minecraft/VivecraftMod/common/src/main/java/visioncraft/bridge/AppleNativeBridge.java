@@ -35,6 +35,7 @@ public final class AppleNativeBridge implements AutoCloseable {
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicBoolean closeRequested = new AtomicBoolean(false);
     private final AtomicLong lastPoseTimestampNs = new AtomicLong(0L);
+    private final AtomicLong lastPongTimestampNs = new AtomicLong(System.nanoTime());
     private final AtomicLong connectionGeneration = new AtomicLong(0L);
     private final AtomicInteger recenterCounter = new AtomicInteger(0);
 
@@ -110,6 +111,7 @@ public final class AppleNativeBridge implements AutoCloseable {
             lastDisconnectCause = null;
             sessionState = SessionState.CLOSED;
             connected.set(true);
+            lastPongTimestampNs.set(System.nanoTime());
             readerThread = new Thread(() -> readLoop(generation, newSocket, in, newOut), "visioncraft-bridge-reader");
             readerThread.setDaemon(true);
             readerThread.start();
@@ -124,23 +126,24 @@ public final class AppleNativeBridge implements AutoCloseable {
         }
     }
 
+    private static final int MAX_LINE_CHARS = 64 * 1024;
+
     private void readLoop(
         long generation,
         Socket ownedSocket,
         InputStream in,
         BufferedOutputStream ownedOut
     ) {
-        StringBuilder line = new StringBuilder();
         String disconnectCause = "VisionCraft host closed the bridge";
-        try {
-            int b;
-            while (connected.get() && (b = in.read()) != -1) {
-                if (b == '\n') {
-                    handleLine(line.toString());
-                    line.setLength(0);
-                } else {
-                    line.append((char) b);
+        try (var reader = new java.io.BufferedReader(
+            new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8), 8192)) {
+            String line;
+            while (connected.get() && (line = reader.readLine()) != null) {
+                if (line.length() > MAX_LINE_CHARS) {
+                    close();
+                    return;
                 }
+                handleLine(line);
             }
         } catch (IOException e) {
             disconnectCause = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
@@ -183,7 +186,9 @@ public final class AppleNativeBridge implements AutoCloseable {
                     String tracking = obj.get("tracking_state").getAsString();
                     int recenter = obj.has("recenter_counter") ? obj.get("recenter_counter").getAsInt() : 0;
                     long ts = obj.get("timestamp_ns").getAsLong();
-                    latestPose = new Pose(ts, pos, rot, tracking, recenter);
+                    long sampleTs = obj.has("sample_timestamp_ns")
+                        ? obj.get("sample_timestamp_ns").getAsLong() : 0L;
+                    latestPose = new Pose(ts, pos, rot, tracking, recenter, sampleTs);
                     lastPoseTimestampNs.set(ts);
                     recenterCounter.set(recenter);
                     BridgeMetrics.get().onPose(ts);
@@ -212,13 +217,30 @@ public final class AppleNativeBridge implements AutoCloseable {
                         recenterCounter.set(obj.get("recenter_counter").getAsInt());
                     }
                 }
-                case "pong" -> { /* latency probe */ }
+                case "pong" -> lastPongTimestampNs.set(System.nanoTime());
                 default -> { /* ignore */ }
             }
         } catch (RuntimeException e) {
             // Field-level parse issue (missing/!numeric field on a known type):
             // skip this message, keep the reader alive.
         }
+    }
+
+    /**
+     * A device frustum's per-eye tangents must be finite and a sensible positive magnitude
+     * (positive half-angle tangents; the largest plausible is well under 16 ≈ 86°). Rejects the
+     * NaN/zero placeholder the host forwards before the AVP reports real FOV.
+     */
+    private static boolean tangentsAreSane(float[] tan) {
+        if (tan == null || tan.length != 4) {
+            return false;
+        }
+        for (float t : tan) {
+            if (!Float.isFinite(t) || t <= 0f || t > 16f) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static float[] parseFloatArray(com.google.gson.JsonArray arr, int expected) {
@@ -260,7 +282,17 @@ public final class AppleNativeBridge implements AutoCloseable {
         if (leftTan == null || rightTan == null) {
             return null;
         }
+        // The host forwards ALVR's first client ViewsConfig verbatim, which is a placeholder with
+        // NaN tangents (and ipd≈0.1) until the AVP reports its real per-eye FOV. A NaN/degenerate
+        // frustum renders broken (non-fuseable) eye buffers, so reject it here: the provider keeps
+        // showing the host's fuseable standby pattern until a finite, plausible view_config lands.
+        if (!tangentsAreSane(leftTan) || !tangentsAreSane(rightTan)) {
+            return null;
+        }
         float ipd = obj.has("ipd_m") ? obj.get("ipd_m").getAsFloat() : 0f;
+        if (!Float.isFinite(ipd) || ipd < 0f) {
+            ipd = 0f;
+        }
         return new ViewConfig(leftTan, rightTan, leftW, leftH, rightW, rightH, ipd);
     }
 
@@ -512,6 +544,30 @@ public final class AppleNativeBridge implements AutoCloseable {
         return lastPoseTimestampNs.get();
     }
 
+    /** True when a pong arrived within {@code maxAgeNs} (used by the Java provider watchdog). */
+    public boolean isBridgeResponsive(long maxAgeNs) {
+        if (!connected.get()) {
+            return false;
+        }
+        return System.nanoTime() - lastPongTimestampNs.get() < maxAgeNs;
+    }
+
+    /** Test-only: simulate host session transitions without a live Mac host. */
+    public void setSessionStateForTesting(SessionState state) {
+        sessionState = state;
+    }
+
+    /** Test-only: exercise {@link #sendFrame} gating without opening a socket. */
+    public void setConnectedAndSessionForTesting(SessionState state) {
+        connected.set(true);
+        sessionState = state;
+    }
+
+    /** True when {@link #sendFrame} would pass the session gate (connected + {@link SessionState#READY}). */
+    public boolean canSendFrames() {
+        return connected.get() && sessionState == SessionState.READY;
+    }
+
     @Override
     public synchronized void close() {
         closeRequested.set(true);
@@ -596,10 +652,17 @@ public final class AppleNativeBridge implements AutoCloseable {
         float[] positionM,
         float[] orientationXyzw,
         String trackingState,
-        int recenterCounter
+        int recenterCounter,
+        /**
+         * The host's ALVR tracking-sample timestamp this pose was resolved for (ns). Unlike
+         * {@link #timestampNs} (host wall clock, used for staleness), this is the opaque id ALVR
+         * uses to key its predicted-pose history. Vivecraft echoes it back on the rendered
+         * {@code frame} so the client reprojects against the exact pose it rendered. 0 if absent.
+         */
+        long sampleTimestampNs
     ) {
         public static Pose identity() {
-            return new Pose(0L, new float[]{0f, 1.65f, 0f}, new float[]{0f, 0f, 0f, 1f}, "valid", 0);
+            return new Pose(0L, new float[]{0f, 1.65f, 0f}, new float[]{0f, 0f, 0f, 1f}, "valid", 0, 0L);
         }
 
         public boolean isValid() {

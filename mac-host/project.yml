@@ -48,6 +48,10 @@ targets:
     preBuildScripts:
       - name: Prepare ALVR Artifacts
         script: |
+          if [[ "${VISIONCRAFT_SKIP_PREPARE_ALVR:-}" == "1" ]]; then
+            echo "VISIONCRAFT_SKIP_PREPARE_ALVR=1 — skipping prepare-alvr.sh"
+            exit 0
+          fi
           "$SRCROOT/../scripts/prepare-alvr.sh"
     postBuildScripts:
       - name: Embed ALVR server_core

@@ -70,21 +70,37 @@ else
   ok "source validation prerequisites present"
 fi
 
+visionos_app_present() {
+  [[ -f "$ALVR_VISIONOS/ALVRClient.xcodeproj/project.pbxproj" ]] \
+    && [[ -f "$ALVR_TREE/Cargo.toml" ]]
+}
+
 if [[ $CHECK_SOURCE_ONLY -eq 0 ]]; then
-  step "Initializing ALVR submodules"
-  git -C "$REPO_ROOT" submodule update --init visionos-app
-  [[ -d "$ALVR_VISIONOS/.git" || -f "$ALVR_VISIONOS/.git" ]] \
-    || die "visionos-app must be the alvr-visionos submodule"
-  git -C "$ALVR_VISIONOS" submodule update --init --recursive
+  if [[ -d "$ALVR_VISIONOS/.git" || -f "$ALVR_VISIONOS/.git" ]]; then
+    step "Initializing ALVR submodules"
+    git -C "$REPO_ROOT" submodule update --init visionos-app
+    git -C "$ALVR_VISIONOS" submodule update --init --recursive
+  elif visionos_app_present; then
+    step "Using vendored visionos-app tree (monorepo mode)"
+    info "visionos-app has no .git; skipping submodule update"
+  else
+    die "visionos-app is missing; run: git submodule update --init --recursive visionos-app"
+  fi
 else
   step "Checking vendored ALVR checkout"
 fi
-[[ -d "$ALVR_VISIONOS/.git" || -f "$ALVR_VISIONOS/.git" ]] \
-  || die "visionos-app is missing; run: git submodule update --init --recursive visionos-app"
-[[ -d "$ALVR_TREE/.git" || -f "$ALVR_TREE/.git" ]] \
-  || die "visionos-app/ALVR is missing; run: git -C visionos-app submodule update --init --recursive"
-[[ -f "$ALVR_VISIONOS/ALVRClient.xcodeproj/project.pbxproj" ]] \
-  || die "visionos-app is missing ALVRClient.xcodeproj"
+
+if ! visionos_app_present; then
+  die "visionos-app is missing ALVRClient.xcodeproj or ALVR/Cargo.toml; run: git submodule update --init --recursive visionos-app"
+fi
+
+if [[ -d "$ALVR_VISIONOS/.git" || -f "$ALVR_VISIONOS/.git" ]]; then
+  if [[ ! -d "$ALVR_TREE/.git" && ! -f "$ALVR_TREE/.git" ]]; then
+    die "visionos-app/ALVR submodule not initialized; run: git -C visionos-app submodule update --init --recursive"
+  fi
+elif [[ ! -f "$ALVR_TREE/Cargo.toml" ]]; then
+  die "visionos-app/ALVR is missing; ensure the vendored ALVR tree is present"
+fi
 
 step "Checking local signing configuration"
 if [[ -n "${VISIONCRAFT_DEVELOPMENT_TEAM:-}" || -n "${VISIONCRAFT_ALVR_CLIENT_BUNDLE_ID:-}" ]]; then
@@ -209,10 +225,17 @@ check_vendored_source_control() {
   local fail=0
   step "Checking vendored ALVR source-control state"
 
+  if [[ ! -d "$ALVR_VISIONOS/.git" && ! -f "$ALVR_VISIONOS/.git" ]]; then
+    warn "monorepo vendored visionos-app (no .git); skipping submodule pointer checks"
+    return 0
+  fi
+
   check_clean_git_tree "visionos-app" "$ALVR_VISIONOS" || fail=1
-  check_clean_git_tree "visionos-app/ALVR" "$ALVR_TREE" || fail=1
-  check_recorded_submodule_pointer "parent repo" "$REPO_ROOT" "visionos-app" "$ALVR_VISIONOS" || fail=1
-  check_recorded_submodule_pointer "visionos-app" "$ALVR_VISIONOS" "ALVR" "$ALVR_TREE" || fail=1
+  if [[ -d "$ALVR_TREE/.git" || -f "$ALVR_TREE/.git" ]]; then
+    check_clean_git_tree "visionos-app/ALVR" "$ALVR_TREE" || fail=1
+    check_recorded_submodule_pointer "parent repo" "$REPO_ROOT" "visionos-app" "$ALVR_VISIONOS" || fail=1
+    check_recorded_submodule_pointer "visionos-app" "$ALVR_VISIONOS" "ALVR" "$ALVR_TREE" || fail=1
+  fi
 
   if [[ $fail -ne 0 ]]; then
     printf '%s\n' >&2

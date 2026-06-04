@@ -151,7 +151,7 @@ struct Entry: View {
                     
                         Toggle(isOn: $gStore.settings.realityKitRenderer) {
                             Text("RealityKit renderer*")
-                            Text("*Deprecated! May cause juddering and/or nausea!")
+                            Text("*VisionCraft: leave OFF for full VR (Metal). ON shows a mixed window, not immersive stereo.")
                             .font(.system(size: 10))
                         }
                         .toggleStyle(.switch)
@@ -409,9 +409,10 @@ private struct VisionCraftSetupPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                setupLine("1", "Run `scripts/vc.sh host --rebuild` on the Mac.")
-                setupLine("2", "Keep the Mac and Apple Vision Pro awake on the same LAN.")
-                setupLine("3", "When connected, press Enter, then start `scripts/vc.sh sender` or Minecraft + F7.")
+                setupLine("1", "Mac: `scripts/vc.sh host --rebuild --synthetic` (ALVR-only test pattern).")
+                setupLine("2", "Advanced: RealityKit renderer OFF, Enable progressive OFF — use Metal full immersion.")
+                setupLine("3", "When connected, press Enter. Stable picture = colored edge bars + checkerboard, no pulsing grid.")
+                setupLine("4", "After synthetic is stable: `scripts/vc.sh minecraft` and press F7 in-game.")
             }
 
             if !eventHandler.hostAlvrVersion.isEmpty {

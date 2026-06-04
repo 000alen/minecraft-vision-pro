@@ -39,7 +39,8 @@ When the test-pattern sender is stable:
 
 ```bash
 scripts/vc.sh minecraft
-# In Minecraft, press F7 at the title screen.
+# Apple Vision: VR auto-enables on the title screen when "Remember VR" is on (not during the Mojang splash).
+# Otherwise press F7 on the title screen.
 scripts/vc.sh verify
 scripts/vc.sh observe 30
 ```
@@ -61,7 +62,9 @@ It launches the installed ALVRClient with `xcrun devicectl device process launch
 | AVP says "Waiting for VisionCraftHost" | `scripts/vc.sh status`, `doctor`, `devicectl device info apps` | Host not running, LAN/firewall, signing/bundle mismatch, mDNS |
 | AVP shows "Enter" but no stream | `host --synthetic`, `observe 30`, `avp-console 120` | ALVR session, decoder config, renderer lifecycle |
 | Synthetic works but `test-sender` fails | `logs/sender.log`, bridge port/process snapshot | Bridge v1/test-pattern sender |
-| Synthetic and `test-sender` work but Minecraft fails | `logs/minecraft.log`, F7/VR state, controller state | Vivecraft Apple provider or render submitter |
+| Synthetic and `test-sender` work but Minecraft fails | `.run/minecraft.log`, F7/VR state, controller state | Vivecraft Apple provider or render submitter |
+| Minecraft window opens then closes; log stops mid-startup, no `crash-reports/` | `fabric/runs/client/logs/latest.log`, avoid `vc.sh host` while MC is up, launch from Terminal | Process killed externally (`clean`, agent shell, or duplicate Gradle), not always a JVM crash |
+| Gray/black rectangle on Mojang red splash (matches empty AVP view); window may flicker closed/reopened | Wait for title screen; ensure `scripts/vc.sh host` is up first; see [vivecraft-backend-notes.md](vivecraft-backend-notes.md#apple-vision-mac-boot) | Remember-VR used to enable stereo during splash (mirror + window resize); fixed by deferred title-screen VR |
 | "Missing video format" | Check IDR/config lines in AVP console and `alvr_frames_sent` | Decoder config timing or IDR recovery |
 | Renderer crash on reconnect | AVP console stack, `Renderer.swift`, frame queue state | ALVRClient renderer lifecycle |
 
@@ -69,7 +72,7 @@ It launches the installed ALVRClient with `xcrun devicectl device process launch
 
 - `scripts/vc.sh host` runs `clean`; it intentionally stops frame sources. Use `scripts/vc.sh synthetic` to arm test frames on an already-running host.
 - Only one Java frame source may own the bridge at a time.
-- ALVRClient connecting makes the bridge session `ready`; Java frame sources should wait instead of sending early.
+- ALVRClient connecting starts the bridge session in `paused`; the Mac host promotes to `ready` only after tracking + synced `view_config`. Java must not send frames until `ready` (see `scripts/vc.sh verify` and `bridge_streaming_ready` on `/status`).
 - ALVR runtime directory/log setup is process-once; host stop/start cycles reuse the initialized server_core environment.
 - The bridge caches the latest headset `view_config`, sends it to late Java clients, and heartbeats it while the session is `ready`.
 - The host sends HEVC VPS/SPS/PPS out-of-band through ALVR decoder config and keeps them inline on IDR frames for decoder recovery.

@@ -4,12 +4,16 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import visioncraft.bridge.AppleNativeBridge;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Arrays;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -35,9 +39,18 @@ public final class MockVisionCraftHost implements AutoCloseable {
     private Thread acceptThread;
     private final MockHostStats stats = new MockHostStats();
     private final Set<Socket> clients = ConcurrentHashMap.newKeySet();
+    private final String dumpDir;
+    private final AtomicInteger dumpRemaining;
 
     public MockVisionCraftHost(int port) {
+        this(port, null, 0);
+    }
+
+    /** {@code dumpDir != null} dumps the first {@code dumpFrames} received frames as per-eye PNGs. */
+    public MockVisionCraftHost(int port, String dumpDir, int dumpFrames) {
         this.port = port;
+        this.dumpDir = dumpDir;
+        this.dumpRemaining = new AtomicInteger(dumpFrames);
     }
 
     /** Binds to an ephemeral port; call {@link #getBoundPort()} after {@link #start()}. */
@@ -49,10 +62,30 @@ public final class MockVisionCraftHost implements AutoCloseable {
     }
 
     public static void main(String[] args) throws Exception {
-        int port = args.length > 0 ? Integer.parseInt(args[0]) : AppleNativeBridge.DEFAULT_PORT;
-        try (MockVisionCraftHost host = new MockVisionCraftHost(port)) {
+        int port = AppleNativeBridge.DEFAULT_PORT;
+        String dumpDir = null;
+        int dumpFrames = 0;
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case "--dump-dir" -> dumpDir = args[++i];
+                case "--dump-frames" -> dumpFrames = Integer.parseInt(args[++i]);
+                default -> {
+                    if (args[i].matches("\\d+")) {
+                        port = Integer.parseInt(args[i]);
+                    }
+                }
+            }
+        }
+        if (dumpDir != null && dumpFrames <= 0) {
+            dumpFrames = 4;
+        }
+        try (MockVisionCraftHost host = new MockVisionCraftHost(port, dumpDir, dumpFrames)) {
             host.start();
             System.out.println("MockVisionCraftHost listening on " + host.getBoundPort());
+            if (dumpDir != null) {
+                System.out.println("MockVisionCraftHost dumping first " + dumpFrames
+                    + " frames to " + dumpDir);
+            }
             Thread.currentThread().join();
         }
     }
@@ -95,8 +128,15 @@ public final class MockVisionCraftHost implements AutoCloseable {
             InputStream in = new BufferedInputStream(c.getInputStream());
             BufferedOutputStream out = new BufferedOutputStream(c.getOutputStream())
         ) {
-            sendJson(out, sessionJson("ready"));
+            sendJson(out, sessionJson("paused"));
             sendJson(out, VIEW_CONFIG_JSON);
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            sendJson(out, sessionJson("ready"));
             sendJson(out, handJson());
             sendJson(out, controllerJson());
             AtomicInteger recenterCounter = new AtomicInteger(0);
@@ -116,6 +156,58 @@ public final class MockVisionCraftHost implements AutoCloseable {
         } finally {
             clients.remove(client);
         }
+    }
+
+    /**
+     * Dump the first {@code dumpFrames} received frames as per-eye PNGs (no flip; the test-pattern
+     * sender writes top-down, so PNGs come out upright). Useful for offline bridge/packing checks.
+     */
+    private void maybeDumpFrame(JsonObject frame, byte[] payload, int leftLen, int rightLen) {
+        if (dumpDir == null || dumpRemaining.get() <= 0 || dumpRemaining.getAndDecrement() <= 0) {
+            return;
+        }
+        try {
+            JsonObject left = frame.getAsJsonObject("left");
+            JsonObject right = frame.getAsJsonObject("right");
+            int lw = left.get("width").getAsInt();
+            int lh = left.get("height").getAsInt();
+            int rw = right.get("width").getAsInt();
+            int rh = right.get("height").getAsInt();
+            File dir = new File(dumpDir);
+            if (!dir.exists() && !dir.mkdirs()) {
+                System.err.println("MockVisionCraftHost could not create dump dir " + dir);
+                return;
+            }
+            long id = frame.get("frame_id").getAsLong();
+            String stem = String.format("frame_%08d", id);
+            byte[] leftBytes = Arrays.copyOfRange(payload, 0, leftLen);
+            byte[] rightBytes = Arrays.copyOfRange(payload, leftLen, leftLen + rightLen);
+            writePng(leftBytes, lw, lh, new File(dir, stem + "_left.png"));
+            writePng(rightBytes, rw, rh, new File(dir, stem + "_right.png"));
+            System.out.println("MockVisionCraftHost dumped frame " + id + " to " + dir.getAbsolutePath());
+        } catch (Exception e) {
+            System.err.println("MockVisionCraftHost dump failed: " + e.getMessage());
+        }
+    }
+
+    private static void writePng(byte[] rgba, int width, int height, File out) throws IOException {
+        if (rgba.length < width * height * 4) {
+            return;
+        }
+        BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        int rowBytes = width * 4;
+        for (int y = 0; y < height; y++) {
+            int row = y * rowBytes;
+            for (int x = 0; x < width; x++) {
+                int i = row + x * 4;
+                int r = rgba[i] & 0xFF;
+                int g = rgba[i + 1] & 0xFF;
+                int b = rgba[i + 2] & 0xFF;
+                int a = rgba[i + 3] & 0xFF;
+                img.setRGB(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+            }
+        }
+        ImageIO.write(img, "png", out);
     }
 
     private void readLoop(InputStream in, BufferedOutputStream out, AtomicInteger recenterCounter)
@@ -141,6 +233,7 @@ public final class MockVisionCraftHost implements AutoCloseable {
                 stats.lastFrameId = pendingFrame.get("frame_id").getAsLong();
                 stats.lastLeftBytes = leftLen;
                 stats.lastRightBytes = rightLen;
+                maybeDumpFrame(pendingFrame, payload, leftLen, rightLen);
                 pendingFrame = null;
                 pendingBinary = 0;
                 continue;
@@ -199,9 +292,17 @@ public final class MockVisionCraftHost implements AutoCloseable {
 
     private void poseLoop(BufferedOutputStream out, AtomicInteger recenterCounter, AtomicBoolean running) {
         float yaw = 0f;
+        int poseTicks = 0;
         while (running.get()) {
             try {
                 yaw += 0.002f;
+                poseTicks += 1;
+                if (poseTicks % 120 == 0) {
+                    synchronized (out) {
+                        sendJson(out, handJson());
+                        sendJson(out, controllerJson());
+                    }
+                }
                 float half = yaw / 2f;
                 float qy = (float) Math.sin(half);
                 float qw = (float) Math.cos(half);
@@ -240,13 +341,37 @@ public final class MockVisionCraftHost implements AutoCloseable {
         return String.format("{\"type\":\"session\",\"version\":1,\"state\":\"%s\"}", state);
     }
 
-    /** Representative asymmetric per-eye frustum (nasal edge tangent smaller than temporal). */
-    private static final String VIEW_CONFIG_JSON =
-        "{\"type\":\"view_config\",\"version\":1,\"ipd_m\":0.063," +
-            "\"views\":[" +
-            "{\"index\":0,\"tangents\":[1.21,0.93,1.02,1.02],\"width\":1888,\"height\":1824}," +
-            "{\"index\":1,\"tangents\":[0.93,1.21,1.02,1.02],\"width\":1888,\"height\":1824}" +
-            "]}";
+    /**
+     * Asymmetric per-eye frustum (nasal edge tangent smaller than temporal). Defaults to a
+     * representative AVP-like config, but every field can be overridden via environment so the
+     * EXACT device {@code view_config} captured from one live session (see a capture bundle's
+     * {@code header.json}) can be replayed headless:
+     * <ul>
+     *   <li>{@code VISIONCRAFT_VIEW_IPD_M} (default {@code 0.063})</li>
+     *   <li>{@code VISIONCRAFT_VIEW_TANGENTS_LEFT} / {@code _RIGHT} — comma {@code L,R,U,D}
+     *       (defaults {@code 1.21,0.93,1.02,1.02} / {@code 0.93,1.21,1.02,1.02})</li>
+     *   <li>{@code VISIONCRAFT_VIEW_EYE_WIDTH} / {@code _HEIGHT} (defaults {@code 1888}/{@code 1824})</li>
+     * </ul>
+     */
+    private static final String VIEW_CONFIG_JSON = buildViewConfigJson();
+
+    private static String env(String key, String fallback) {
+        String v = System.getenv(key);
+        return (v == null || v.isBlank()) ? fallback : v.trim();
+    }
+
+    private static String buildViewConfigJson() {
+        String ipd = env("VISIONCRAFT_VIEW_IPD_M", "0.063");
+        String left = env("VISIONCRAFT_VIEW_TANGENTS_LEFT", "1.21,0.93,1.02,1.02");
+        String right = env("VISIONCRAFT_VIEW_TANGENTS_RIGHT", "0.93,1.21,1.02,1.02");
+        String w = env("VISIONCRAFT_VIEW_EYE_WIDTH", "1888");
+        String h = env("VISIONCRAFT_VIEW_EYE_HEIGHT", "1824");
+        return "{\"type\":\"view_config\",\"version\":1,\"ipd_m\":" + ipd + ","
+            + "\"views\":["
+            + "{\"index\":0,\"tangents\":[" + left + "],\"width\":" + w + ",\"height\":" + h + "},"
+            + "{\"index\":1,\"tangents\":[" + right + "],\"width\":" + w + ",\"height\":" + h + "}"
+            + "]}";
+    }
 
     /** Right hand fully pinched, left hand open — exercises both the pinch and idle paths. */
     private static String handJson() {

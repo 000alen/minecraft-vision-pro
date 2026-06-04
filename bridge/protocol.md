@@ -22,11 +22,11 @@ Metadata line, then binary:
 {"type":"frame","version":1,"frame_id":12345,"timestamp_ns":123456789,"left":{"width":1512,"height":1680,"format":"rgba8","byte_length":10160640},"right":{"width":1512,"height":1680,"format":"rgba8","byte_length":10160640},"near":0.05,"far":512.0,"render_orientation_xyzw":[0.0,0.0,0.0,1.0]}
 ```
 
-- `render_orientation_xyzw` *(optional)* — the head orientation (raw ARKit world space, the
-  same frame the `pose` message reports) this image was rendered for. The native host forwards
-  it through the AVP stream so the on-device compositor can apply rotational async timewarp
-  (reproject the late frame to the current head pose). Omit it (or send identity) to disable the
-  warp; consumers must treat a missing value as "no reprojection".
+- `render_orientation_xyzw` *(optional, legacy bridge field)* — head orientation the Minecraft
+  frame was rendered for. The **production AVP path is ALVR HEVC**, which does not carry this
+  metadata today; see [docs/alvr-render-orientation.md](../docs/alvr-render-orientation.md).
+  Java may still send the field for future hosts or diagnostics; the Mac ALVR host ignores it
+  when encoding. Omit it (or send identity) when unknown.
 
 Immediately after the newline:
 
@@ -79,10 +79,18 @@ ignore it.
 ### `pose`
 
 ```json
-{"type":"pose","version":1,"timestamp_ns":123456789,"position_m":[0.0,1.65,0.0],"orientation_xyzw":[0.0,0.0,0.0,1.0],"tracking_state":"valid","recenter_counter":4}
+{"type":"pose","version":1,"timestamp_ns":123456789,"sample_timestamp_ns":3950597300416,"position_m":[0.0,1.65,0.0],"orientation_xyzw":[0.0,0.0,0.0,1.0],"tracking_state":"valid","recenter_counter":4}
 ```
 
 `tracking_state`: `valid` | `lost` | `unavailable`
+
+- `sample_timestamp_ns` *(Mac ALVR host)* — the ALVR tracking-sample timestamp this head pose was
+  resolved for (the id ALVR keys its predicted-pose history on). The Vivecraft Apple provider
+  remembers the value of the pose it renders with and echoes it back as the rendered
+  `frame.timestamp_ns`, so the host can submit that frame to ALVR under the timestamp it was
+  rendered for and the headset reprojects (timewarp) against the correct pose. Distinct from
+  `timestamp_ns` (host wall clock, used only for pose staleness). `0`/absent ⇒ no correlation
+  available; the host falls back to its newest tracking sample.
 
 ### `session`
 
@@ -91,6 +99,15 @@ ignore it.
 ```
 
 `state`: `ready` | `paused` | `lost` | `closed`
+
+**Session warmup (Mac ALVR host):** On ALVR client connect the host sends `paused` until it has
+published at least one `pose` with valid tracking **and** a `view_config` whose per-eye dimensions
+match the negotiated ALVR stream. Only then it sends `ready`. Java must treat `paused` like
+`closed` for frame uplink (`sendFrame` rejects non-`ready` sessions) but may still consume pose,
+`view_config`, `controller`, and `hand` messages for warmup.
+
+Diagnostic fields on the host control API (`GET /status`): `bridge_streaming_ready`,
+`sent_video_config`, `frames_encoded`, `frames_dropped_no_config`, `alvr_frames_sent`.
 
 ### `recenter` (native → Java, ack)
 
@@ -208,8 +225,12 @@ has an explicit clock base:
   (`System.currentTimeMillis() * 1_000_000`), never `System.nanoTime()`.
 - **`ping`/`pong.timestamp_ns`** — opaque echo token chosen by the *originator*. The
   responder copies it back verbatim; only the originator interprets it (for RTT).
-- **`frame.timestamp_ns`** — capture time on the Java sender's clock. The native side
-  treats it as an opaque correlation id and does not compare it to its own clock.
+- **`frame.timestamp_ns`** — on the Apple/ALVR path this carries the **ALVR sample timestamp**
+  the frame was rendered for: the Vivecraft Apple provider echoes the `sample_timestamp_ns` of the
+  head pose it rendered with. The Mac host passes this verbatim to `alvr_send_video_nal` so the
+  headset reprojects against the rendered pose. It is **not** a wall-clock value and must not be
+  compared to the host clock. `0` ⇒ the host substitutes its newest tracking sample. (For non-ALVR
+  hosts it remains an opaque capture-time correlation id.)
 
 ## Connection lifecycle
 

@@ -17,10 +17,14 @@ wait_http_ok() {
 print_status() {
   local s="$1"
   info "session_state       = $(json_field "$s" session_state)"
+  info "bridge_streaming_ready = $(json_field "$s" bridge_streaming_ready)"
   info "alvr_running        = $(json_field "$s" alvr_running)"
   info "alvr_client         = $(json_field "$s" alvr_client_connected)"
   info "alvr_frames_sent    = $(json_field "$s" alvr_frames_sent)"
   info "frames_received     = $(json_field "$s" frames_received)"
   info "frames_encoded      = $(json_field "$s" frames_encoded)"
+  info "frames_dropped_no_config = $(json_field "$s" frames_dropped_no_config)"
+  info "sent_video_config   = $(json_field "$s" sent_video_config)"
+  info "synthetic_frames    = $(json_field "$s" synthetic_frames_enabled)"
   info "diagnostic          = $(json_field "$s" diagnostic)"
 }

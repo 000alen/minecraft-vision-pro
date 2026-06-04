@@ -37,6 +37,12 @@ public final class AppleInputProvider {
 
         this.applyHand(provider, ControllerType.LEFT, state.left());
         this.applyHand(provider, ControllerType.RIGHT, state.right());
+        if (state.left().tracked()) {
+            provider.applyBridgeControllerPose(ControllerType.LEFT, state.left());
+        }
+        if (state.right().tracked()) {
+            provider.applyBridgeControllerPose(ControllerType.RIGHT, state.right());
+        }
         updateDigital(provider, ControllerType.RIGHT, VivecraftVRMod.INSTANCE.keyMenuButton,
             menuPressed(state.left()) || menuPressed(state.right()), "menu");
     }

@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.vivecraft.client.api_impl.VRClientAPIImpl;
 import org.vivecraft.client_vr.ClientDataHolderVR;
 import org.vivecraft.client_vr.VRState;
+import org.vivecraft.client_vr.provider.apple.AppleVisionStartup;
 
 import javax.annotation.Nullable;
 
@@ -30,7 +31,9 @@ public abstract class ResourceLoadStateTrackerMixin {
             this.reloadState.reloadReason == ResourceLoadStateTracker.ReloadReason.INITIAL)
         {
             // init vr after first resource loading
-            if (ClientDataHolderVR.getInstance().vrSettings.vrEnabled &&
+            if (AppleVisionStartup.isAppleVisionProvider()) {
+                AppleVisionStartup.onInitialResourcesLoaded();
+            } else if (ClientDataHolderVR.getInstance().vrSettings.vrEnabled &&
                 ClientDataHolderVR.getInstance().vrSettings.rememberVr)
             {
                 VRState.VR_ENABLED = true;

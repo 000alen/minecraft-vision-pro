@@ -36,6 +36,10 @@ For a source-only ALVR hygiene check that does not build artifacts:
 scripts/prepare-alvr.sh --check-source
 ```
 
+`prepare-alvr.sh` accepts a **monorepo vendored** `visionos-app/` tree (no `.git` under `visionos-app` or `ALVR`) when `ALVRClient.xcodeproj` and `ALVR/Cargo.toml` are present. Submodule mode still runs `git submodule update` when `.git` exists.
+
+For offline Mac host iteration only, set `VISIONCRAFT_SKIP_PREPARE_ALVR=1` to skip the Xcode preBuild `prepare-alvr.sh` step (artifacts must already exist under `mac-host/Vendor/ALVRServerCore/`).
+
 `--check-source` validates required VisionCraft source deltas and intentionally allows dirty local vendored development. Before shipping, run the stricter source-control gate:
 
 ```bash

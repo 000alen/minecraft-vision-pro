@@ -10,7 +10,11 @@ import visioncraft.bridge.AppleNativeBridge;
 import visioncraft.bridge.AsyncFrameSender;
 import visioncraft.bridge.BridgeMetrics;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -44,6 +48,14 @@ public final class AppleFrameSubmitter implements AutoCloseable {
         float[] renderOrientation;
     }
 
+    // Debug PNG dump of the pristine per-eye game render (before any host processing). Off unless
+    // -Dvisioncraft.dumpFrames=N is set; writes upright PNGs to -Dvisioncraft.dumpDir on the async
+    // sender thread so it never stalls the render thread. See bridge/protocol.md (bottom-left origin).
+    private static final int DUMP_FRAMES = Integer.getInteger("visioncraft.dumpFrames", 0);
+    private static final String DUMP_DIR =
+        System.getProperty("visioncraft.dumpDir", ".run/captures/vivecraft");
+    private final AtomicInteger dumpRemaining = new AtomicInteger(DUMP_FRAMES);
+
     private final AppleNativeBridge bridge;
     private final AsyncFrameSender sender;
     private final AtomicLong frameId = new AtomicLong();
@@ -59,6 +71,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
     public AppleFrameSubmitter(AppleNativeBridge bridge) {
         this.bridge = bridge;
         this.sender = new AsyncFrameSender(frame -> {
+            maybeDumpFrame(frame);
             long t = System.nanoTime();
             bridge.sendFrame(new AppleNativeBridge.FramePacket(
                 frame.frameId(), frame.timestampNs(),
@@ -74,7 +87,7 @@ public final class AppleFrameSubmitter implements AutoCloseable {
      * Returns immediately; neither the GPU readback nor the socket write blocks the caller.
      */
     public void submitEyeTextures(int leftTextureId, int rightTextureId, int width, int height,
-        float near, float far, float[] renderOrientation) {
+        float near, float far, float[] renderOrientation, long renderSampleTimestampNs) {
         if (!bridge.isConnected() || bridge.getSessionState() != AppleNativeBridge.SessionState.READY) {
             clearPendingReadbacks();
             BridgeMetrics.get().onFrameDropped();
@@ -99,7 +112,10 @@ public final class AppleFrameSubmitter implements AutoCloseable {
             issueReadback(rightTextureId, pboRight[cur]);
             Pending m = meta[cur];
             m.frameId = frameId.incrementAndGet();
-            m.timestampNs = System.nanoTime();
+            // Carry the ALVR sample timestamp of the rendered pose (not a capture-clock value) so
+            // the host can submit the frame to ALVR under the timestamp it was rendered for, which
+            // is what the client's reprojection keys on. Falls back handled host-side when 0.
+            m.timestampNs = renderSampleTimestampNs;
             m.near = near;
             m.far = far;
             m.width = width;
@@ -171,12 +187,63 @@ public final class AppleFrameSubmitter implements AutoCloseable {
         }
     }
 
+    /** Reset monotonic frame ids after the bridge session becomes ready (new ALVR stream). */
+    public void resetFrameIds() {
+        frameId.set(0);
+        clearPendingReadbacks();
+    }
+
     private void clearPendingReadbacks() {
         for (Pending pending : meta) {
             pending.filled = false;
             pending.renderOrientation = null;
         }
         slot = 0;
+    }
+
+    /**
+     * Dump the first {@code visioncraft.dumpFrames} frames' per-eye RGBA8 buffers as upright PNGs.
+     * Runs on the async sender thread (never the render thread). RGBA8 is bottom-left origin (OpenGL),
+     * so rows are flipped to produce a visually upright image.
+     */
+    private void maybeDumpFrame(AsyncFrameSender.Frame frame) {
+        if (dumpRemaining.get() <= 0 || dumpRemaining.getAndDecrement() <= 0) {
+            return;
+        }
+        try {
+            File dir = new File(DUMP_DIR);
+            if (!dir.exists() && !dir.mkdirs()) {
+                VRSettings.LOGGER.warn("VisionCraft: could not create dump dir {}", dir.getAbsolutePath());
+                return;
+            }
+            String stem = String.format("frame_%08d", frame.frameId());
+            writeEyePng(frame.left(), frame.width(), frame.height(), new File(dir, stem + "_left.png"));
+            writeEyePng(frame.right(), frame.width(), frame.height(), new File(dir, stem + "_right.png"));
+            VRSettings.LOGGER.info("VisionCraft: dumped frame {} eyes ({}x{}) to {}",
+                frame.frameId(), frame.width(), frame.height(), dir.getAbsolutePath());
+        } catch (Exception e) {
+            VRSettings.LOGGER.warn("VisionCraft: frame dump failed: {}", e.getMessage());
+        }
+    }
+
+    private static void writeEyePng(byte[] rgba, int width, int height, File out) throws Exception {
+        if (rgba == null || width <= 0 || height <= 0 || rgba.length < width * height * 4) {
+            return;
+        }
+        BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        int rowBytes = width * 4;
+        for (int y = 0; y < height; y++) {
+            int srcRow = (height - 1 - y) * rowBytes; // flip bottom-left -> top-left
+            for (int x = 0; x < width; x++) {
+                int i = srcRow + x * 4;
+                int r = rgba[i] & 0xFF;
+                int g = rgba[i + 1] & 0xFF;
+                int b = rgba[i + 2] & 0xFF;
+                int a = rgba[i + 3] & 0xFF;
+                img.setRGB(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+            }
+        }
+        ImageIO.write(img, "png", out);
     }
 
     private void recordSendFailure(Throwable failure) {

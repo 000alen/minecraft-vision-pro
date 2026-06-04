@@ -122,8 +122,10 @@ public class VRState {
                 if (!garbageCollector.startsWith("ZGC") &&
                     !ClientDataHolderVR.getInstance().vrSettings.disableGarbageCollectorMessage)
                 {
-                    // At least 12 GiB RAM (minus 256 MiB for possible reserved) and 8 CPU threads
-                    if (os.getTotalMemorySize() >= 1073741824L * 12L - 1048576L * 256L &&
+                    if (dh.vrSettings.stereoProviderPluginID == VRSettings.VRProvider.APPLE_VISION) {
+                        VRSettings.LOGGER.info(
+                            "Vivecraft: Apple Vision skips GC modal on Mac (use ZGC in dev: -XX:+UseZGC; play on headset)");
+                    } else if (os.getTotalMemorySize() >= 1073741824L * 12L - 1048576L * 256L &&
                         Runtime.getRuntime().availableProcessors() >= 6)
                     {
                         if (!(Minecraft.getInstance().screen instanceof GarbageCollectorScreen)) {

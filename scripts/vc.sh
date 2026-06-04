@@ -21,6 +21,7 @@
 #   test-sender [n]     Launch the headless test-pattern sender (:bridge-test). n=frame count (0=continuous). Alias: sender.
 #   verify              Assert the live stream is healthy (ALVR client connected, frames flowing, session ready).
 #   observe [seconds]    Capture a reproducible diagnostics bundle under .run/observability/.
+#   capture [frames]     Arm a Mac-side PNG frame-capture bundle under .run/captures/ (recv/sbs/decoded).
 #   avp-console [seconds] Launch ALVRClient via devicectl --console and capture headset stdout/stderr.
 #   stop                Alias for clean.
 #
@@ -116,6 +117,7 @@ cmd_clean() {
   if [[ -n "${fs// /}" ]]; then kill_pids "frame source" $fs; else info "no frame source connected"; fi
   pkill -f ':bridge-test:run' 2>/dev/null || true
   pkill -f ':fabric:runClient' 2>/dev/null || true
+  vc_kill_minecraft_tmux
 
   step "Stopping VisionCraftHost"
   local hp; hp="$(host_pids | tr '\n' ' ')"
@@ -314,18 +316,68 @@ cmd_companion() {
 
 cmd_mc() {
   [[ -n "$(http_get /health)" ]] || die "host not running — run: scripts/vc.sh host"
+  local running; running="$(minecraft_client_pids | tr '\n' ' ')"
+  if [[ -n "${running// /}" ]]; then
+    ok "Minecraft client already running (pid ${running})"
+    info "Apple Vision: VR auto-enables on the title screen when Remember VR is on."
+    info "Otherwise press F7 (or the 'VR: OFF' toggle) on the title screen."
+    info "Tail with:  tail -f $RUN_DIR/minecraft.log"
+    return 0
+  fi
   guard_single_frame_source
   local jdk; jdk="$(require_java21)"
   mkdir -p "$RUN_DIR"
   local log="$RUN_DIR/minecraft.log"
+  local launcher_pid_file="$RUN_DIR/mc.pid"
+  local client_pid_file="$RUN_DIR/mc-client.pid"
+  if [[ -f "$launcher_pid_file" ]] && ! kill -0 "$(cat "$launcher_pid_file")" 2>/dev/null; then
+    rm -f "$launcher_pid_file" "$client_pid_file"
+    wait_minecraft_client_exit 25 || warn "previous Minecraft client still shutting down — waiting before relaunch"
+  fi
   step "Launching Minecraft Fabric dev client"
   info "JAVA_HOME=$jdk"
   info "log: $log"
-  ( cd "$MC_DIR" && nohup env JAVA_HOME="$jdk" PATH="$jdk/bin:$PATH" \
-      ./gradlew :fabric:runClient --console=plain >"$log" 2>&1 & echo $! >"$RUN_DIR/mc.pid" )
-  ok "started (pid $(cat "$RUN_DIR/mc.pid"))"
-  info "When the title screen appears, press F7 (or the 'VR: OFF' toggle) to enable VR."
-  info "Tail with:  tail -f $log"
+  info "also: $MC_DIR/fabric/runs/client/logs/latest.log (full game log)"
+  : >"$log"
+  local launcher_pid="" use_tmux=0
+  if vc_launch_minecraft_tmux "$log" "$jdk" "$MC_DIR"; then
+    use_tmux=1
+    echo "tmux:$VISIONCRAFT_MC_TMUX_SESSION" >"$launcher_pid_file"
+    info "Gradle runs in tmux session '$VISIONCRAFT_MC_TMUX_SESSION' (attach: tmux attach -t $VISIONCRAFT_MC_TMUX_SESSION)"
+  else
+    launcher_pid="$(vc_launch_detached "$log" \
+      env JAVA_HOME="$jdk" PATH="$jdk/bin:$PATH" \
+      bash -c "cd '$MC_DIR' && exec ./gradlew :fabric:runClient --console=plain")"
+    echo "$launcher_pid" >"$launcher_pid_file"
+    warn "tmux not found — using nohup; for Cursor/agent launches prefer Terminal.app or: brew install tmux"
+  fi
+  local t=0 client_pid=""
+  while awk "BEGIN{exit !($t < 120)}"; do
+    client_pid="$(minecraft_client_pids | head -1)"
+    if [[ -n "$client_pid" ]]; then
+      echo "$client_pid" >"$client_pid_file"
+      if [[ $use_tmux -eq 1 ]]; then
+        ok "Minecraft client running (java pid $client_pid, tmux session $VISIONCRAFT_MC_TMUX_SESSION)"
+      else
+        ok "Minecraft client running (java pid $client_pid, Gradle launcher pid $launcher_pid)"
+      fi
+      info "First launch can take 1–2 minutes before the title screen."
+      info "Apple Vision: Mojang splash stays flat; VR auto-enables on the title screen when Remember VR is on."
+      info "Otherwise press F7 on the title screen. Keep scripts/vc.sh host running first."
+      info "Tail with:  tail -f $log"
+      info "If the window vanishes with no crash-report, avoid scripts/vc.sh host (it runs clean)."
+      return 0
+    fi
+    if [[ $use_tmux -eq 0 ]] && ! kill -0 "$launcher_pid" 2>/dev/null; then
+      die "Gradle launcher exited before Minecraft started — check $log and $MC_DIR/fabric/runs/client/logs/latest.log"
+    fi
+    if [[ $use_tmux -eq 1 ]] && ! vc_tmux_has_session; then
+      die "tmux session $VISIONCRAFT_MC_TMUX_SESSION ended before Minecraft started — check $log"
+    fi
+    sleep 2
+    t=$((t + 2))
+  done
+  die "Minecraft client did not start within 120s — check $log (launcher $(cat "$launcher_pid_file" 2>/dev/null || echo '?'))"
 }
 
 cmd_sender() {
@@ -338,20 +390,55 @@ cmd_sender() {
   step "Launching headless test-pattern sender (frames=$n, 0=continuous)"
   info "JAVA_HOME=$jdk"
   info "log: $log"
-  ( cd "$REPO_ROOT" && nohup env JAVA_HOME="$jdk" PATH="$jdk/bin:$PATH" \
-      ./gradlew :bridge-test:run --console=plain --args="127.0.0.1 $BRIDGE_PORT $n" \
-      >"$log" 2>&1 & echo $! >"$RUN_DIR/sender.pid" )
-  ok "started (pid $(cat "$RUN_DIR/sender.pid"))"
+  : >"$log"
+  echo "$(vc_launch_detached "$log" \
+    env JAVA_HOME="$jdk" PATH="$jdk/bin:$PATH" \
+    bash -c "cd '$REPO_ROOT' && exec ./gradlew :bridge-test:run --console=plain --args='127.0.0.1 $BRIDGE_PORT $n'")" \
+    >"$RUN_DIR/sender.pid"
+  ok "started (Gradle launcher pid $(cat "$RUN_DIR/sender.pid"))"
   info "Tail with:  tail -f $log"
 }
 
 cmd_synthetic() {
   [[ -n "$(http_get /health)" ]] || die "host not running — run: scripts/vc.sh host --synthetic"
+  local fs; fs="$(frame_source_pids | tr '\n' ' ')"
+  if [[ -n "$fs" ]]; then
+    step "Stopping bridge frame source(s) for synthetic-only test"
+    kill_pids "bridge frame source" $fs
+    sleep 0.5
+  fi
   step "Enabling host-native ALVR test pattern"
   http_post "/alvr/start?synthetic=true" >/dev/null || die "failed to enable synthetic ALVR frames"
   ok "synthetic source armed"
-  info "This bypasses Java/Minecraft. Frames advance once ALVRClient is connected and immersive."
+  info "Bridge Java/Minecraft frames are ignored while synthetic is active."
+  info "Use Metal renderer (RealityKit OFF) and full immersion for stereo VR."
   print_status "$(http_get /status)"
+}
+
+cmd_capture() {
+  local frames="${1:-4}"
+  [[ "$frames" =~ ^[0-9]+$ ]] || die "capture frame count must be an integer"
+  [[ -n "$(http_get /health)" ]] || die "host not running — run: scripts/vc.sh host first"
+  step "Arming Mac-side frame capture ($frames frames)"
+  local resp; resp="$(http_post "/debug/capture?frames=$frames")"
+  [[ -n "$resp" ]] || die "capture request failed (control API not responding)"
+  local bundle; bundle="$(json_field "$resp" bundle)"
+  info "host response: $resp"
+  [[ -n "$bundle" ]] || die "no bundle path in response; capture not armed"
+  ok "capture armed -> $bundle"
+  info "Stream the next $frames frames (live Minecraft, test-sender, or synthetic) to populate it."
+  local waited=0
+  while [[ $waited -lt 15 ]]; do
+    local n; n="$(find "$bundle" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "${n:-0}" -gt 0 ]] && break
+    sleep 1; waited=$((waited + 1))
+  done
+  info "PNGs so far: $(find "$bundle" -name '*.png' 2>/dev/null | wc -l | tr -d ' ')"
+  info "  $bundle/recv/    raw per-eye received from Java (upright)"
+  info "  $bundle/sbs/     side-by-side composite handed to HEVC encode"
+  info "  $bundle/decoded/ host HEVC self-decode roundtrip"
+  info "  $bundle/header.json  device view_config (ipd + per-eye tangents)"
+  info "  $bundle/manifest.ndjson  per-frame metadata"
 }
 
 cmd_verify() {
@@ -363,12 +450,39 @@ cmd_verify() {
     && ok "ALVR client connected" \
     || { bad "ALVR client NOT connected — wear AVP and run ALVRClient"; fail=1; }
   local ss; ss="$(json_field "$s" session_state)"
-  [[ "$ss" == "ready" ]] && ok "bridge session ready" || { warn "session_state=$ss (becomes 'ready' once ALVR client connects)"; fail=1; }
-  local a b; a="$(json_field "$s" frames_encoded)"; sleep 1.5; b="$(json_field "$(http_get /status)" frames_encoded)"
-  if [[ "${a:-0}" =~ ^[0-9]+$ && "${b:-0}" =~ ^[0-9]+$ && "$b" -gt "$a" ]]; then
-    ok "frames flowing (${a} → ${b})"
+  local bsr; bsr="$(json_field "$s" bridge_streaming_ready)"
+  if [[ "$ss" == "ready" && "$bsr" == "true" ]]; then
+    ok "bridge session ready (streaming)"
+  elif [[ "$ss" == "paused" || "$bsr" != "true" ]]; then
+    warn "session_state=$ss bridge_streaming_ready=${bsr:-false} — host warms up in paused until tracking + view_config"
+    fail=1
   else
-    bad "frames not advancing (${a} → ${b}) — run vc.sh synthetic for ALVR-only, or vc.sh test-sender/minecraft + F7"; fail=1
+    warn "session_state=$ss bridge_streaming_ready=${bsr:-false}"
+    fail=1
+  fi
+  local afs; afs="$(json_field "$s" alvr_frames_sent)"
+  local fr_a; fr_a="$(json_field "$s" frames_received)"
+  local a b; a="$(json_field "$s" frames_encoded)"
+  sleep 1.5
+  s="$(http_get /status)"
+  b="$(json_field "$s" frames_encoded)"
+  local bfs; bfs="$(json_field "$s" alvr_frames_sent)"
+  if [[ "${a:-0}" =~ ^[0-9]+$ && "${b:-0}" =~ ^[0-9]+$ && "$b" -gt "$a" ]]; then
+    ok "host encoder advancing (${a} → ${b} frames_encoded)"
+  else
+    bad "frames_encoded not advancing (${a} → ${b}) — run vc.sh synthetic, or test-sender/minecraft + F7"; fail=1
+  fi
+  if [[ "${afs:-0}" =~ ^[0-9]+$ && "${bfs:-0}" =~ ^[0-9]+$ && "$bfs" -gt "$afs" ]]; then
+    ok "ALVR video uplink advancing (${afs} → ${bfs} alvr_frames_sent)"
+  elif [[ "${a:-0}" =~ ^[0-9]+$ && "${b:-0}" =~ ^[0-9]+$ && "$b" -gt "$a" ]]; then
+    warn "alvr_frames_sent static (${afs} → ${bfs}) but frames_encoded moved — check ALVR client connect"
+  else
+    bad "alvr_frames_sent not advancing (${afs} → ${bfs})"; fail=1
+  fi
+  local fr_b; fr_b="$(json_field "$s" frames_received)"
+  if [[ "${fr_a:-0}" =~ ^[0-9]+$ && "${fr_b:-0}" =~ ^[0-9]+$ && "$fr_b" -gt "$fr_a" && "$b" -le "$a" ]]; then
+    bad "frames_received advancing (${fr_a} → ${fr_b}) but frames_encoded flat (${a} → ${b}) — check synthetic mode, session_state, or bridge frame drops in host logs"
+    fail=1
   fi
   [[ $fail -eq 0 ]] && step "${C_GREEN}STREAM LIVE${C_RESET}" || step "${C_YEL}stream not fully live (see above)${C_RESET}"
   return "$fail"
@@ -393,6 +507,7 @@ main() {
     test-sender|sender) cmd_sender "$@";;
     verify)    cmd_verify "$@";;
     observe)   cmd_observe "$@";;
+    capture)   cmd_capture "$@";;
     avp-console) cmd_avp_console "$@";;
     -h|--help|help) usage;;
     *) printf '%s\n' "unknown command: $cmd" >&2; usage; exit 2;;
