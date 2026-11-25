@@ -28,8 +28,12 @@ public final class ApplePoseProvider {
         if (!pose.isValid()) {
             return;
         }
-        long now = System.nanoTime();
-        long poseAgeNs = pose.timestampNs() > 0 ? now - pose.timestampNs() : 0;
+        // pose.timestampNs() is the host's epoch wall clock (bridge/protocol.md: pose timestamps are
+        // System.currentTimeMillis()*1e6, never nanoTime), so staleness MUST be measured against the
+        // same epoch base. Comparing to System.nanoTime() (arbitrary origin) never trips and the
+        // guard would be dead code against the real host.
+        long nowEpochNs = System.currentTimeMillis() * 1_000_000L;
+        long poseAgeNs = pose.timestampNs() > 0 ? nowEpochNs - pose.timestampNs() : 0;
         if (poseAgeNs > POSE_STALE_NS) {
             return;
         }

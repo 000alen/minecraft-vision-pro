@@ -651,13 +651,12 @@ final class AlvrServerCoordinator {
 
     private func publishPose(sampleTimestampNs: UInt64) {
         var pose = VCAlvrPoseSample()
-        let trackingState: String
-        if vc_alvr_get_head_pose(sampleTimestampNs, &pose) {
-            trackingState = "valid"
-        } else {
-            trackingState = "lost"
-            return
-        }
+        // No pose for this sample ⇒ skip this tick entirely. We only ever publish "valid" poses;
+        // Java treats any non-"valid" tracking_state as not-applicable, so there is nothing to gain
+        // by emitting a placeholder "lost" pose (and doing so would refresh Java's pose-staleness
+        // clock during an actual tracking gap).
+        guard vc_alvr_get_head_pose(sampleTimestampNs, &pose) else { return }
+        let trackingState = "valid"
         let bridgeTimestampNs = Self.epochNanoseconds()
         // sample_timestamp_ns is the ALVR tracking-sample id this pose was resolved for. Vivecraft
         // echoes it back on the rendered frame so the client reprojects (timewarp) against the

@@ -274,7 +274,17 @@ client_artifact="$ALVR_VISIONOS/ALVRClient/ALVRClientCore.xcframework"
 server_header="$HOST_VENDOR/alvr_server_core.h"
 server_dylib="$HOST_VENDOR/libalvr_server_core.dylib"
 artifact_stamp="$HOST_VENDOR/.alvr-artifacts.stamp"
-alvr_commit="$(git -C "$ALVR_TREE" rev-parse HEAD)"
+# Identity of the vendored ALVR source the artifacts were built from. In submodule mode the ALVR
+# tree has its own .git, so its HEAD is the right key. In monorepo mode (ALVR vendored without a
+# nested .git) `git -C "$ALVR_TREE" rev-parse HEAD` walks up to the PARENT repo HEAD, which changes
+# on every unrelated commit and forces a needless (and Xcode-script-phase-fragile) full Rust
+# rebuild. Use the subtree object hash instead, which only changes when the ALVR source changes.
+if [[ -d "$ALVR_TREE/.git" || -f "$ALVR_TREE/.git" ]]; then
+  alvr_commit="$(git -C "$ALVR_TREE" rev-parse HEAD)"
+else
+  alvr_commit="$(git -C "$REPO_ROOT" rev-parse "HEAD:visionos-app/ALVR" 2>/dev/null \
+    || echo "vendored-uncommitted")"
+fi
 expected_stamp="$(
   printf 'alvr_commit=%s\n' "$alvr_commit"
   printf 'source_version=%s\n' "$ARTIFACT_SOURCE_VERSION"

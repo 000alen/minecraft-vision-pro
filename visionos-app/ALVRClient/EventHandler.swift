@@ -577,7 +577,12 @@ class EventHandler: ObservableObject {
 
                 objc_sync_enter(frameQueueLock)
                 framesSinceLastDecode = 0
-                if frameQueueLastTimestamp != timestamp
+                // Always enqueue the decoded frame (upstream ALVR behavior). Under VisionCraft's
+                // render-pose contract Java echoes the rendered pose's sample timestamp, so when
+                // tracking stalls or render fps outpaces tracking, consecutive frames legitimately
+                // share a timestamp. Gating on `!= timestamp` would silently drop those, freezing
+                // animation for the duration of the stall.
+                if frameQueueLastTimestamp != timestamp || true
                 {
                     alvr_report_frame_decoded(timestamp)
                     

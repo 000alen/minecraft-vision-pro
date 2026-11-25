@@ -306,7 +306,10 @@ public final class MockVisionCraftHost implements AutoCloseable {
                 float half = yaw / 2f;
                 float qy = (float) Math.sin(half);
                 float qw = (float) Math.cos(half);
-                long ts = System.nanoTime();
+                // Epoch wall clock per bridge/protocol.md (pose timestamps are
+                // System.currentTimeMillis()*1e6, never nanoTime) so the client's staleness check
+                // sees a comparable base.
+                long ts = System.currentTimeMillis() * 1_000_000L;
                 String json = String.format(
                     "{\"type\":\"pose\",\"version\":1,\"timestamp_ns\":%d," +
                         "\"position_m\":[0.0,1.65,0.0],\"orientation_xyzw\":[0.0,%s,0.0,%s]," +

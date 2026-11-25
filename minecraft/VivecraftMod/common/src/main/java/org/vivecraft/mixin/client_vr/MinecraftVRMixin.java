@@ -66,7 +66,6 @@ import org.vivecraft.client.utils.ClientUtils;
 import org.vivecraft.client.utils.TextUtils;
 import org.vivecraft.client.utils.UpdateChecker;
 import org.vivecraft.client_vr.ClientDataHolderVR;
-import org.vivecraft.client_vr.provider.apple.AppleVisionStartup;
 import org.vivecraft.client_vr.MethodHolder;
 import org.vivecraft.client_vr.VRState;
 import org.vivecraft.client_vr.extensions.GameRendererExtension;
